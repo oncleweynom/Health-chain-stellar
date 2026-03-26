@@ -17,6 +17,12 @@ pub enum Error {
     InvalidOrgType = 202,
     AlreadyInitialized = 203,
     Unauthorized = 204,
+    InvalidRating = 205,
+    AlreadyRated = 206,
+    OrganizationNotFound = 207,
+    BadgeAlreadyAwarded = 208,
+    BadgeNotFound = 209,
+    InvalidDeliveryProof = 210,
 }
 
 // ---------------------------------------------------------------------------
@@ -154,12 +160,37 @@ pub struct IdentityContract;
 impl IdentityContract {
     /// Initialize the contract with an admin
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::Admin) {
+        if Self::is_initialized(env.clone()) {
             return Err(Error::AlreadyInitialized);
         }
+
         env.storage().instance().set(&DataKey::Admin, &admin);
-        Self::grant_role(env, admin, Role::Admin);
+        env.storage().instance().set(&DataKey::OrgCounter, &0u32);
+        Self::grant_role(env.clone(), admin.clone(), Role::Admin);
+
+        env.events()
+            .publish((symbol_short!("init"),), admin);
+
         Ok(())
+    }
+
+    pub fn is_initialized(env: Env) -> bool {
+        env.storage().instance().has(&DataKey::Admin)
+    }
+
+    pub fn get_admin(env: Env) -> Result<Address, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Unauthorized)
+    }
+
+    pub fn get_org_counter(env: Env) -> Result<u32, Error> {
+        if !Self::is_initialized(env.clone()) {
+            return Err(Error::Unauthorized);
+        }
+
+        Ok(env.storage().instance().get(&DataKey::OrgCounter).unwrap_or(0))
     }
 
     /// Register a new organization
@@ -623,12 +654,6 @@ impl IdentityContract {
         count += 1;
         env.storage().instance().set(&key, &count);
         count
-    }
-}
-
-    /// Get organization by ID
-    pub fn get_organization(env: Env, org_id: Address) -> Option<Organization> {
-        env.storage().persistent().get(&DataKey::Org(org_id))
     }
 }
 

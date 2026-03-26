@@ -1,11 +1,72 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{testutils::Address as _, testutils::Ledger as _, vec, Address, BytesN, Env, String};
+use soroban_sdk::{
+    testutils::{Address as _, Events as _, Ledger as _},
+    vec, Address, BytesN, Env, String,
+};
 
 // ---------------------------------------------------------------------------
 // IdentityContract tests
 // ---------------------------------------------------------------------------
+
+#[test]
+fn test_initialize_sets_admin_counter_and_admin_role() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(IdentityContract, ());
+    let client = IdentityContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    assert!(client.is_initialized());
+    assert_eq!(client.get_admin(), admin.clone());
+    assert_eq!(client.get_org_counter(), 0);
+    assert_eq!(client.get_role(&admin).unwrap(), Role::Admin);
+}
+
+#[test]
+fn test_initialize_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(IdentityContract, ());
+    let client = IdentityContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    assert_eq!(env.events().all().len(), 1);
+}
+
+#[test]
+fn test_initialize_cannot_run_twice() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(IdentityContract, ());
+    let client = IdentityContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    client.initialize(&admin);
+
+    let result = client.try_initialize(&admin);
+    assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
+}
+
+#[test]
+fn test_initialize_guards_readers_before_init() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(IdentityContract, ());
+    let client = IdentityContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.try_get_admin(), Err(Ok(Error::Unauthorized)));
+    assert_eq!(client.try_get_org_counter(), Err(Ok(Error::Unauthorized)));
+}
 
 #[test]
 fn test_register_organization() {
