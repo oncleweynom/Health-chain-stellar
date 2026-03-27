@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { OptimisticLockVersionMismatchError, Repository } from 'typeorm';
 
 import {
   OrderConfirmedEvent,
@@ -255,9 +255,23 @@ export class OrdersService {
 
   async update(id: string, updateOrderDto: any) {
     const order = await this.findOrderOrFail(id);
+    if (updateOrderDto.version !== undefined && updateOrderDto.version !== order.version) {
+      throw new ConflictException(
+        `Order '${id}' was modified by another request. Fetch the latest version and retry.`,
+      );
+    }
     Object.assign(order, updateOrderDto);
-    const updated = await this.orderRepo.save(order);
-    return { message: 'Order updated successfully', data: updated };
+    try {
+      const updated = await this.orderRepo.save(order);
+      return { message: 'Order updated successfully', data: updated };
+    } catch (err) {
+      if (err instanceof OptimisticLockVersionMismatchError) {
+        throw new ConflictException(
+          `Order '${id}' was modified by another request. Fetch the latest version and retry.`,
+        );
+      }
+      throw err;
+    }
   }
 
   /**
@@ -279,9 +293,17 @@ export class OrdersService {
 
     const order = await this.findOrderOrFail(id);
     await this.requestStatusService.applyStatusUpdate(order, dto, actorId, actorRole);
-    const updated = await this.orderRepo.save(order);
-
-    return { message: 'Order status updated successfully', data: updated };
+    try {
+      const updated = await this.orderRepo.save(order);
+      return { message: 'Order status updated successfully', data: updated };
+    } catch (err) {
+      if (err instanceof OptimisticLockVersionMismatchError) {
+        throw new ConflictException(
+          `Order '${id}' was modified by another request. Fetch the latest version and retry.`,
+        );
+      }
+      throw err;
+    }
   }
 
   /**
@@ -303,7 +325,16 @@ export class OrdersService {
   async assignRider(orderId: string, riderId: string, actorId?: string) {
     const order = await this.findOrderOrFail(orderId);
     order.riderId = riderId;
-    await this.orderRepo.save(order);
+    try {
+      await this.orderRepo.save(order);
+    } catch (err) {
+      if (err instanceof OptimisticLockVersionMismatchError) {
+        throw new ConflictException(
+          `Order '${orderId}' was modified by another request. Fetch the latest version and retry.`,
+        );
+      }
+      throw err;
+    }
 
     this.eventEmitter.emit(
       'order.rider.assigned',

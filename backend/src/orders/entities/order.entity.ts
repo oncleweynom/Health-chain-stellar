@@ -4,6 +4,7 @@ import {
   Column,
   CreateDateColumn,
   UpdateDateColumn,
+  VersionColumn,
 } from 'typeorm';
 
 import { OrderStatus } from '../enums/order-status.enum';
@@ -43,6 +44,9 @@ export class OrderEntity {
 
   @Column({ name: 'dispute_reason', nullable: true, type: 'text' })
   disputeReason: string | null;
+
+  @VersionColumn()
+  version: number;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
