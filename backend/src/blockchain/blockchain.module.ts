@@ -25,8 +25,7 @@ import { JobDeduplicationPlugin } from './plugins/job-deduplication.plugin';
         defaultJobOptions: {
           attempts: 5,
           backoff: {
-            type: 'exponential',
-            delay: 1000,
+            type: 'custom',
           },
           removeOnComplete: true,
           removeOnFail: false,

@@ -2,7 +2,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 
 import { QueueMetricsService } from '../services/queue-metrics.service';
-import { SorobanTxProcessor } from '../processors/soroban-tx.processor';
+import { SorobanTxProcessor, computeBackoffDelay } from '../processors/soroban-tx.processor';
 import { SorobanTxJob } from '../types/soroban-tx.types';
 
 const mockQueueMetricsService = {
@@ -209,6 +209,34 @@ describe('SorobanTxProcessor', () => {
       await processor.handleJobFailure(jobId, error);
 
       expect(alertSpy).toHaveBeenCalledWith(jobId, error);
+    });
+  });
+
+  describe('computeBackoffDelay (thundering herd prevention)', () => {
+    it('should return a delay within the jitter window for each attempt', () => {
+      // attempt 0: window = [0, min(30000, 1000*1)] = [0, 1000)
+      // attempt 1: window = [0, min(30000, 1000*2)] = [0, 2000)
+      // attempt 4: window = [0, min(30000, 1000*16)] = [0, 16000)
+      const windows = [1000, 2000, 4000, 8000, 16000];
+      windows.forEach((max, attempt) => {
+        const delay = computeBackoffDelay(attempt);
+        expect(delay).toBeGreaterThanOrEqual(0);
+        expect(delay).toBeLessThan(max);
+      });
+    });
+
+    it('should cap delay at RETRY_MAX_DELAY_MS (30 000 ms)', () => {
+      // attempt 10: 1000 * 2^10 = 1 024 000 >> 30 000
+      for (let i = 0; i < 20; i++) {
+        expect(computeBackoffDelay(10)).toBeLessThan(30_000);
+      }
+    });
+
+    it('should produce different delays across calls (randomness)', () => {
+      const delays = Array.from({ length: 20 }, () => computeBackoffDelay(3));
+      const unique = new Set(delays);
+      // With a window of [0, 8000) the probability of all 20 being identical is negligible
+      expect(unique.size).toBeGreaterThan(1);
     });
   });
 });
