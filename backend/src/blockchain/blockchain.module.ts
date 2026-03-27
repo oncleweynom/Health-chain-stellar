@@ -1,5 +1,6 @@
 import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 
 import { CompensationModule } from '../common/compensation/compensation.module';
 
@@ -15,29 +16,35 @@ import { SorobanService } from './services/soroban.service';
 @Module({
   imports: [
     CompensationModule,
-    BullModule.registerQueue(
+    BullModule.registerQueueAsync(
       {
         name: 'soroban-tx-queue',
-        connection: {
-          host: process.env.REDIS_HOST || 'localhost',
-          port: parseInt(process.env.REDIS_PORT || '6379'),
-        },
-        defaultJobOptions: {
-          attempts: 5,
-          backoff: {
-            type: 'exponential',
-            delay: 1000,
+        useFactory: (configService: ConfigService) => ({
+          connection: {
+            host: configService.get<string>('REDIS_HOST'),
+            port: configService.get<number>('REDIS_PORT'),
           },
-          removeOnComplete: true,
-          removeOnFail: false,
-        },
+          defaultJobOptions: {
+            attempts: 5,
+            backoff: {
+              type: 'exponential',
+              delay: 1000,
+            },
+            removeOnComplete: true,
+            removeOnFail: false,
+          },
+        }),
+        inject: [ConfigService],
       },
       {
         name: 'soroban-dlq',
-        connection: {
-          host: process.env.REDIS_HOST || 'localhost',
-          port: parseInt(process.env.REDIS_PORT || '6379'),
-        },
+        useFactory: (configService: ConfigService) => ({
+          connection: {
+            host: configService.get<string>('REDIS_HOST'),
+            port: configService.get<number>('REDIS_PORT'),
+          },
+        }),
+        inject: [ConfigService],
       },
     ),
   ],
