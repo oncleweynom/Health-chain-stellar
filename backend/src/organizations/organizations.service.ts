@@ -10,9 +10,6 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { InjectRepository } from '@nestjs/typeorm';
-
-import { Repository } from 'typeorm';
 
 import { SorobanService } from '../blockchain/services/soroban.service';
 import { EmailProvider } from '../notifications/providers/email.provider';
@@ -20,6 +17,7 @@ import { EmailProvider } from '../notifications/providers/email.provider';
 import { RegisterOrganizationDto } from './dto/register-organization.dto';
 import { RejectOrganizationDto } from './dto/reject-organization.dto';
 import { OrganizationEntity } from './entities/organization.entity';
+import { OrganizationRepository } from './organizations.repository';
 import { OrganizationVerificationStatus } from './enums/organization-verification-status.enum';
 
 const ALLOWED_MIME = new Set([
@@ -34,8 +32,7 @@ export class OrganizationsService {
   private readonly logger = new Logger(OrganizationsService.name);
 
   constructor(
-    @InjectRepository(OrganizationEntity)
-    private readonly orgRepo: Repository<OrganizationEntity>,
+    private readonly orgRepo: OrganizationRepository,
     private readonly emailProvider: EmailProvider,
     private readonly sorobanService: SorobanService,
     private readonly configService: ConfigService,
@@ -118,6 +115,7 @@ export class OrganizationsService {
 
     const existing = await this.orgRepo.findOne({
       where: { licenseNumber: dto.licenseNumber },
+      withDeleted: true,
     });
     if (existing) {
       throw new ConflictException({
@@ -154,10 +152,12 @@ export class OrganizationsService {
   }
 
   async listPending(): Promise<OrganizationEntity[]> {
-    return this.orgRepo.find({
-      where: { status: OrganizationVerificationStatus.PENDING_VERIFICATION },
-      order: { createdAt: 'ASC' },
-    });
+    return this.orgRepo.createActiveQueryBuilder('org')
+      .where('org.status = :status', {
+        status: OrganizationVerificationStatus.PENDING_VERIFICATION,
+      })
+      .orderBy('org.createdAt', 'ASC')
+      .getMany();
   }
 
   async approve(
@@ -244,6 +244,9 @@ export class OrganizationsService {
   }
 
   private async sendRegistrationReceivedEmail(org: OrganizationEntity) {
+    if (!org.email) {
+      return;
+    }
     const subject = 'We received your organization registration';
     const html = `
       <p>Hello ${org.name},</p>
@@ -254,6 +257,9 @@ export class OrganizationsService {
   }
 
   private async sendApprovedEmail(org: OrganizationEntity) {
+    if (!org.email) {
+      return;
+    }
     const subject = 'Your organization registration was approved';
     const txLine = org.blockchainTxHash
       ? `<p>On-chain reference: <code>${org.blockchainTxHash}</code></p>`
@@ -271,6 +277,9 @@ export class OrganizationsService {
   }
 
   private async sendRejectedEmail(org: OrganizationEntity) {
+    if (!org.email) {
+      return;
+    }
     const subject = 'Update on your organization registration';
     const html = `
       <p>Hello ${org.name},</p>
