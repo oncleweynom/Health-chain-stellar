@@ -5,7 +5,8 @@ import { Repository, LessThanOrEqual, MoreThanOrEqual } from 'typeorm';
 
 import { BloodRequestItemEntity } from '../../blood-requests/entities/blood-request-item.entity';
 import { BloodRequestEntity } from '../../blood-requests/entities/blood-request.entity';
-import { BloodUnitEntity } from '../../blood-units/entities/blood-unit.entity';
+import { BloodUnit } from '../../blood-units/entities/blood-unit.entity';
+import { BloodStatus } from '../../blood-units/enums/blood-status.enum';
 import { InventoryStockEntity } from '../../inventory/entities/inventory-stock.entity';
 
 export interface BloodTypeCompatibility {
@@ -94,8 +95,8 @@ export class BloodMatchingService {
   };
 
   constructor(
-    @InjectRepository(BloodUnitEntity)
-    private readonly bloodUnitRepository: Repository<BloodUnitEntity>,
+    @InjectRepository(BloodUnit)
+    private readonly bloodUnitRepository: Repository<BloodUnit>,
     @InjectRepository(BloodRequestEntity)
     private readonly bloodRequestRepository: Repository<BloodRequestEntity>,
     @InjectRepository(BloodRequestItemEntity)
@@ -195,13 +196,13 @@ export class BloodMatchingService {
   private async findAvailableUnits(
     bloodTypes: string[],
     quantityMl: number,
-  ): Promise<BloodUnitEntity[]> {
+  ): Promise<BloodUnit[]> {
     const now = new Date();
 
     return this.bloodUnitRepository.find({
       where: {
         bloodType: bloodTypes as any,
-        status: 'available' as any,
+        status: BloodStatus.AVAILABLE,
         expiresAt: MoreThanOrEqual(now),
       },
       order: {
@@ -211,7 +212,7 @@ export class BloodMatchingService {
   }
 
   private async scoreMatches(
-    units: BloodUnitEntity[],
+    units: BloodUnit[],
     request: MatchingRequest,
   ): Promise<MatchResult[]> {
     const scoredMatches: MatchResult[] = [];
@@ -238,7 +239,7 @@ export class BloodMatchingService {
   }
 
   private async calculateMatchScore(
-    unit: BloodUnitEntity,
+    unit: BloodUnit,
     request: MatchingRequest,
   ): Promise<number> {
     let score = 0;

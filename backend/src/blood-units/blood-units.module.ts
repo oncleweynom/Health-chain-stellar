@@ -13,11 +13,14 @@ import { BloodStatusService } from './blood-status.service';
 import { BloodUnitsController } from './blood-units.controller';
 import { BloodUnitsService } from './blood-units.service';
 import { QrVerificationService } from './qr-verification.service';
+import { QuarantineService } from './services/quarantine.service';
 import { BloodUnit, BloodUnitEntity } from './entities/blood-unit.entity';
 import { BloodStatusHistory } from './entities/blood-status-history.entity';
 import { QrVerificationLogEntity } from './entities/qr-verification-log.entity';
 import { UnitDispositionRecord } from './entities/unit-disposition.entity';
+import { QuarantineCase } from './entities/quarantine-case.entity';
 import { DispositionController } from './controllers/disposition.controller';
+import { QuarantineController } from './controllers/quarantine.controller';
 import { DispositionService } from './services/disposition.service';
 
 @Module({
@@ -31,24 +34,27 @@ import { DispositionService } from './services/disposition.service';
       QrVerificationLogEntity,
       OrderEntity,
       UnitDispositionRecord,
+      QuarantineCase,
     ]),
     SorobanModule,
     NotificationsModule,
     DonorEligibilityModule,
   ],
-  controllers: [BloodUnitsController, DispositionController],
+  controllers: [BloodUnitsController, DispositionController, QuarantineController],
   providers: [
     BloodUnitsService,
     BloodStatusService,
     BloodInventoryQueryService,
     QrVerificationService,
     DispositionService,
+    QuarantineService,
   ],
   exports: [
     BloodUnitsService,
     BloodStatusService,
     BloodInventoryQueryService,
     DispositionService,
+    QuarantineService,
   ],
 })
 export class BloodUnitsModule {}

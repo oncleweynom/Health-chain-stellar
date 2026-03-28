@@ -18,6 +18,7 @@ import {
   ShieldAlert,
   Upload,
   Droplets,
+  FlaskConical,
 } from "lucide-react";
 
 function classNames(...classes: (string | undefined | null | false)[]) {
@@ -32,6 +33,7 @@ const sidebarLinks = [
   { name: "Hospitals", href: "/dashboard/hospitals", icon: Building2 },
   { name: "Track Riders", href: "/dashboard/track-riders", icon: Bike },
   { name: "Anomaly Queue", href: "/admin/anomalies", icon: ShieldAlert },
+  { name: "Quarantine Review", href: "/admin/quarantine", icon: FlaskConical },
   { name: "Batch Import", href: "/admin/batch-import", icon: Upload },
   { name: "Expiration Forecast", href: "/admin/expiration-forecast", icon: Droplets },
 ];

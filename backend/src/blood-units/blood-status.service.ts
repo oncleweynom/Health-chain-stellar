@@ -13,6 +13,7 @@ import { LessThan, Repository } from 'typeorm';
 import { NotificationChannel } from '../notifications/enums/notification-channel.enum';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BlockchainEvent } from '../soroban/entities/blockchain-event.entity';
+import { SorobanService } from '../soroban/soroban.service';
 
 import {
   BulkUpdateBloodStatusDto,
@@ -67,6 +68,7 @@ export class BloodStatusService {
     @InjectRepository(BlockchainEvent)
     private readonly blockchainEventRepository: Repository<BlockchainEvent>,
     private readonly notificationsService: NotificationsService,
+    private readonly sorobanService: SorobanService,
   ) {}
 
   async updateStatus(
@@ -294,6 +296,29 @@ export class BloodStatusService {
     changedBy: string | null,
   ): Promise<void> {
     try {
+      const blockchainUnitId = Number(unit.blockchainUnitId);
+      const canMirrorOnChain = Number.isFinite(blockchainUnitId);
+
+      if (canMirrorOnChain && newStatus === BloodStatus.QUARANTINED) {
+        await this.sorobanService.quarantineBloodUnit({
+          unitId: blockchainUnitId,
+          reason: 'OTHER',
+        });
+      }
+
+      if (
+        canMirrorOnChain &&
+        previousStatus === BloodStatus.QUARANTINED &&
+        (newStatus === BloodStatus.AVAILABLE || newStatus === BloodStatus.DISCARDED)
+      ) {
+        await this.sorobanService.finalizeQuarantine({
+          unitId: blockchainUnitId,
+          disposition:
+            newStatus === BloodStatus.AVAILABLE ? 'RELEASE' : 'DISCARD',
+          reason: 'OTHER',
+        });
+      }
+
       const uniqueSuffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       await this.blockchainEventRepository.save(
         this.blockchainEventRepository.create({

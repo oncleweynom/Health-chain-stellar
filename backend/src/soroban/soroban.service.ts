@@ -442,6 +442,108 @@ export class SorobanService implements OnModuleInit {
     });
   }
 
+  async quarantineBloodUnit(params: {
+    unitId: number;
+    caller?: string;
+    reason?:
+      | 'SCREENING_FAILURE'
+      | 'TEMPERATURE_BREACH'
+      | 'CONTAMINATION_SUSPECTED'
+      | 'DONOR_LEVEL_EVENT'
+      | 'MANUAL_OPERATOR_ACTION'
+      | 'ANOMALY_DETECTION'
+      | 'OTHER';
+  }): Promise<{ transactionHash: string }> {
+    return this.executeWithRetry(async () => {
+      const account = await this.server.getAccount(
+        this.sourceKeypair.publicKey(),
+      );
+      const caller = params.caller ?? this.sourceKeypair.publicKey();
+
+      const transaction = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          this.contract.call(
+            'quarantine_blood',
+            this.createAddressScVal(caller),
+            xdr.ScVal.scvU64(xdr.Uint64.fromString(params.unitId.toString())),
+            this.mapQuarantineReason(params.reason ?? 'OTHER'),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      transaction.sign(this.sourceKeypair);
+      const response = await this.server.sendTransaction(transaction);
+
+      if (response.status === 'PENDING') {
+        await this.pollTransactionStatus(response.hash);
+        await this.saveEvent({
+          eventType: 'blood_quarantined',
+          transactionHash: response.hash,
+          data: params,
+        });
+        return { transactionHash: response.hash };
+      }
+
+      throw new Error(`Transaction failed: ${response.status}`);
+    });
+  }
+
+  async finalizeQuarantine(params: {
+    unitId: number;
+    caller?: string;
+    reason?:
+      | 'SCREENING_FAILURE'
+      | 'TEMPERATURE_BREACH'
+      | 'CONTAMINATION_SUSPECTED'
+      | 'DONOR_LEVEL_EVENT'
+      | 'MANUAL_OPERATOR_ACTION'
+      | 'ANOMALY_DETECTION'
+      | 'OTHER';
+    disposition: 'RELEASE' | 'DISCARD';
+  }): Promise<{ transactionHash: string }> {
+    return this.executeWithRetry(async () => {
+      const account = await this.server.getAccount(
+        this.sourceKeypair.publicKey(),
+      );
+      const caller = params.caller ?? this.sourceKeypair.publicKey();
+
+      const transaction = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          this.contract.call(
+            'finalize_quarantine',
+            this.createAddressScVal(caller),
+            xdr.ScVal.scvU64(xdr.Uint64.fromString(params.unitId.toString())),
+            this.mapQuarantineReason(params.reason ?? 'OTHER'),
+            this.mapQuarantineDisposition(params.disposition),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      transaction.sign(this.sourceKeypair);
+      const response = await this.server.sendTransaction(transaction);
+
+      if (response.status === 'PENDING') {
+        await this.pollTransactionStatus(response.hash);
+        await this.saveEvent({
+          eventType: 'blood_quarantine_finalized',
+          transactionHash: response.hash,
+          data: params,
+        });
+        return { transactionHash: response.hash };
+      }
+
+      throw new Error(`Transaction failed: ${response.status}`);
+    });
+  }
+
   /**
    * Execute operation with retry logic and exponential backoff
    */
@@ -544,6 +646,34 @@ export class SorobanService implements OnModuleInit {
     }
 
     return xdr.ScVal.scvU32(enumValue);
+  }
+
+  private mapQuarantineReason(
+    reason:
+      | 'SCREENING_FAILURE'
+      | 'TEMPERATURE_BREACH'
+      | 'CONTAMINATION_SUSPECTED'
+      | 'DONOR_LEVEL_EVENT'
+      | 'MANUAL_OPERATOR_ACTION'
+      | 'ANOMALY_DETECTION'
+      | 'OTHER',
+  ): xdr.ScVal {
+    const map: Record<string, number> = {
+      SCREENING_FAILURE: 0,
+      TEMPERATURE_BREACH: 1,
+      CONTAMINATION_SUSPECTED: 2,
+      DONOR_LEVEL_EVENT: 3,
+      MANUAL_OPERATOR_ACTION: 4,
+      ANOMALY_DETECTION: 5,
+      OTHER: 6,
+    };
+    return xdr.ScVal.scvU32(map[reason]);
+  }
+
+  private mapQuarantineDisposition(
+    disposition: 'RELEASE' | 'DISCARD',
+  ): xdr.ScVal {
+    return xdr.ScVal.scvU32(disposition === 'RELEASE' ? 0 : 1);
   }
 
   private createAddressScVal(publicKey: string): xdr.ScVal {

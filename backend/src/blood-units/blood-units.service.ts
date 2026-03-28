@@ -23,6 +23,9 @@ import {
   LogTemperatureDto,
 } from './dto/blood-units.dto';
 import { BloodUnitEntity } from './entities/blood-unit.entity';
+import { BloodStatus } from './enums/blood-status.enum';
+import { QuarantineReasonCode, QuarantineTriggerSource } from './enums/quarantine.enums';
+import { QuarantineService } from './services/quarantine.service';
 
 interface AuthenticatedUserContext {
   id: string;
@@ -32,12 +35,15 @@ interface AuthenticatedUserContext {
 @Injectable()
 export class BloodUnitsService {
   private readonly logger = new Logger(BloodUnitsService.name);
+  private readonly minStorageTempC = 1;
+  private readonly maxStorageTempC = 6;
 
   constructor(
     private readonly sorobanService: SorobanService,
     private readonly notificationsService: NotificationsService,
     private readonly permissionsService: PermissionsService,
     private readonly donorEligibilityService: DonorEligibilityService,
+    private readonly quarantineService: QuarantineService,
     @InjectRepository(BloodUnitTrail)
     private readonly trailRepository: Repository<BloodUnitTrail>,
     @InjectRepository(BloodUnitEntity)
@@ -135,6 +141,8 @@ export class BloodUnitsService {
   }
 
   async transferCustody(dto: TransferCustodyDto) {
+    await this.assertUnitTransferable(dto.unitId);
+
     const result = await this.sorobanService.transferCustody({
       unitId: dto.unitId,
       fromAccount: dto.fromAccount,
@@ -150,12 +158,46 @@ export class BloodUnitsService {
   }
 
   async logTemperature(dto: LogTemperatureDto) {
+    const matchedUnit = await this.findByBlockchainUnitId(dto.unitId);
+
     const result = await this.sorobanService.logTemperature({
       unitId: dto.unitId,
       temperature: dto.temperature,
       timestamp: dto.timestamp || Math.floor(Date.now() / 1000),
       bloodType: dto.bloodType,
     });
+
+    if (
+      matchedUnit &&
+      (dto.temperature < this.minStorageTempC ||
+        dto.temperature > this.maxStorageTempC)
+    ) {
+      try {
+        await this.quarantineService.createCase(
+          {
+            bloodUnitId: matchedUnit.id,
+            triggerSource: QuarantineTriggerSource.TEMPERATURE_BREACH,
+            reasonCode: QuarantineReasonCode.STORAGE_ANOMALY,
+            reason: `Temperature ${dto.temperature}C breached threshold [${this.minStorageTempC}, ${this.maxStorageTempC}]`,
+            metadata: {
+              onChainUnitId: dto.unitId,
+              observedTemperature: dto.temperature,
+              threshold: {
+                min: this.minStorageTempC,
+                max: this.maxStorageTempC,
+              },
+            },
+          },
+          undefined,
+        );
+      } catch (error) {
+        this.logger.warn(
+          `Temperature breach quarantine trigger failed for unit ${matchedUnit.id}: ${
+            error instanceof Error ? error.message : 'unknown error'
+          }`,
+        );
+      }
+    }
 
     return {
       success: true,
@@ -268,6 +310,30 @@ export class BloodUnitsService {
         `Notification skipped for blood unit ${unit.unitNumber}: ${
           error instanceof Error ? error.message : 'unknown error'
         }`,
+      );
+    }
+  }
+
+  private async findByBlockchainUnitId(
+    blockchainUnitId: number,
+  ): Promise<BloodUnitEntity | null> {
+    return this.bloodUnitRepository.findOne({
+      where: {
+        blockchainUnitId: blockchainUnitId as unknown as any,
+      },
+    });
+  }
+
+  private async assertUnitTransferable(blockchainUnitId: number): Promise<void> {
+    const unit = await this.findByBlockchainUnitId(blockchainUnitId);
+    if (!unit) {
+      return;
+    }
+
+    const normalizedStatus = String((unit as unknown as { status?: string }).status || '').toUpperCase();
+    if (normalizedStatus === BloodStatus.QUARANTINED) {
+      throw new BadRequestException(
+        `Blood unit ${unit.unitNumber} is quarantined and cannot be transferred`,
       );
     }
   }
