@@ -27,8 +27,7 @@ import { OrganizationReviewQueryDto } from './dto/organization-review-query.dto'
 import { RegisterOrganizationDto } from './dto/register-organization.dto';
 import { RejectOrganizationDto } from './dto/reject-organization.dto';
 import { ReportOrganizationReviewDto } from './dto/report-organization-review.dto';
-import { RevokeVerificationDto } from './dto/revoke-verification.dto';
-import { VerifyOrganizationDto } from './dto/verify-organization.dto';
+import { SearchOrganizationsDto } from './dto/search-organizations.dto';
 import { OrganizationsService } from './organizations.service';
 import { OrganizationReviewsService } from './services/organization-reviews.service';
 import { VerificationSyncService } from './services/verification-sync.service';
@@ -70,6 +69,21 @@ export class OrganizationsController {
   @Get('pending')
   listPending() {
     return this.organizationsService.listPending();
+  }
+
+  @Public()
+  @Get('search')
+  search(
+    @Query(
+      new ValidationPipe({
+        transform: true,
+        whitelist: true,
+        forbidNonWhitelisted: true,
+      }),
+    )
+    query: SearchOrganizationsDto,
+  ) {
+    return this.organizationsService.search(query);
   }
 
   @RequirePermissions(Permission.ADMIN_ACCESS)

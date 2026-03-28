@@ -1,5 +1,8 @@
 #![no_std]
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, symbol_short, vec, Address, Env, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, vec, Address, Env, String,
+    Vec,
+};
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -15,6 +18,26 @@ pub enum PaymentStatus {
 }
 
 #[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisputeReason {
+    FailedDelivery,
+    TemperatureExcursion,
+    PaymentContested,
+    WrongItem,
+    DamagedGoods,
+    LateDelivery,
+    Other,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisputeMetadata {
+    pub reason: DisputeReason,
+    pub case_id: String,
+    pub resolved: bool,
+}
+
+#[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Payment {
     pub id: u64,
@@ -25,6 +48,7 @@ pub struct Payment {
     pub status: PaymentStatus,
     pub created_at: u64,
     pub updated_at: u64,
+    pub dispute_metadata: Option<DisputeMetadata>,
 }
 
 #[contracttype]
@@ -47,6 +71,27 @@ pub struct PaymentPage {
     pub page_size: u32,
 }
 
+/// Recurring / earmarked donation pledge recorded on-chain (schedule enforced off-chain).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DonationPledge {
+    pub id: u64,
+    pub donor: Address,
+    /// Amount intended each period (smallest units; same convention as [`Payment::amount`])
+    pub amount_per_period: i128,
+    /// Seconds between executions (e.g. 2_592_000 ≈ 30 days)
+    pub interval_secs: u64,
+    /// Beneficiary pool or project identifier
+    pub payee_pool: String,
+    /// Healthcare cause / program tag
+    pub cause: String,
+    /// Geographic earmark
+    pub region: String,
+    pub emergency_pool: bool,
+    pub active: bool,
+    pub created_at: u64,
+}
+
 #[contracterror]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -55,16 +100,22 @@ pub enum Error {
     InvalidAmount = 501,
     SamePayerPayee = 502,
     InvalidPage = 503,
+    NotPledgeDonor = 504,
 }
 
 // ── Storage keys ───────────────────────────────────────────────────────────────
 
 const PAYMENT_COUNTER: soroban_sdk::Symbol = symbol_short!("PAY_CTR");
+const PLEDGE_COUNTER: soroban_sdk::Symbol = symbol_short!("PLG_CTR");
 
 /// Build a storage key for a payment by encoding its numeric id into a Symbol.
 /// Uses a (u64, &str) tuple as the composite key to avoid Symbol length limits.
 fn payment_key(id: u64) -> (u64, &'static str) {
     (id, "pay")
+}
+
+fn pledge_key(id: u64) -> (u64, &'static str) {
+    (id, "plg")
 }
 
 fn get_counter(env: &Env) -> u64 {
@@ -75,6 +126,14 @@ fn set_counter(env: &Env, val: u64) {
     env.storage().instance().set(&PAYMENT_COUNTER, &val);
 }
 
+fn get_pledge_counter(env: &Env) -> u64 {
+    env.storage().instance().get(&PLEDGE_COUNTER).unwrap_or(0u64)
+}
+
+fn set_pledge_counter(env: &Env, val: u64) {
+    env.storage().instance().set(&PLEDGE_COUNTER, &val);
+}
+
 fn store_payment(env: &Env, payment: &Payment) {
     let key = payment_key(payment.id);
     env.storage().persistent().set(&key, payment);
@@ -83,6 +142,15 @@ fn store_payment(env: &Env, payment: &Payment) {
 fn load_payment(env: &Env, id: u64) -> Option<Payment> {
     let key = payment_key(id);
     env.storage().persistent().get(&key)
+}
+
+fn store_pledge(env: &Env, pledge: &DonationPledge) {
+    let key = pledge_key(pledge.id);
+    env.storage().persistent().set(&key, pledge);
+}
+
+fn load_pledge(env: &Env, id: u64) -> Option<DonationPledge> {
+    env.storage().persistent().get(&pledge_key(id))
 }
 
 // ── Contract ───────────────────────────────────────────────────────────────────
@@ -122,6 +190,7 @@ impl PaymentContract {
             status: PaymentStatus::Pending,
             created_at: now,
             updated_at: now,
+            dispute_metadata: None,
         };
 
         store_payment(&env, &payment);
@@ -134,12 +203,111 @@ impl PaymentContract {
         Ok(counter)
     }
 
+    /// Create an escrow payment: verify the hospital has sufficient balance,
+    /// then transfer funds from the hospital to this contract and record the
+    /// payment as `Locked`.
+    ///
+    /// Returns `Error::InsufficientEscrowFunds { required, available }` if the
+    /// hospital's token balance is below `amount`, so the NestJS backend can
+    /// surface a meaningful error message instead of an opaque host panic.
+    ///
+    /// No storage entry is written if the balance check fails.
+    pub fn create_escrow(
+        env: Env,
+        request_id: u64,
+        hospital: Address,
+        payee: Address,
+        amount: i128,
+        token: Address,
+    ) -> Result<u64, Error> {
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        if hospital == payee {
+            return Err(Error::SamePayerPayee);
+        }
+
+        hospital.require_auth();
+
+        // Balance check BEFORE any state is written.
+        let token_client = token::Client::new(&env, &token);
+        let available = token_client.balance(&hospital);
+        if available < amount {
+            return Err(Error::InsufficientEscrowFunds);
+        }
+
+        // Transfer funds into escrow (this contract).
+        token_client.transfer(&hospital, &env.current_contract_address(), &amount);
+
+        let counter = get_counter(&env) + 1;
+        set_counter(&env, counter);
+
+        let now = env.ledger().timestamp();
+        let payment = Payment {
+            id: counter,
+            request_id,
+            payer: hospital,
+            payee,
+            amount,
+            status: PaymentStatus::Locked,
+            created_at: now,
+            updated_at: now,
+        };
+
+        store_payment(&env, &payment);
+
+        env.events().publish(
+            (symbol_short!("payment"), symbol_short!("escrowed")),
+            counter,
+        );
+
+        Ok(counter)
+    }
+
     /// Update payment status (internal helper exposed for testing).
     pub fn update_status(env: Env, payment_id: u64, status: PaymentStatus) -> Result<(), Error> {
         let mut payment = load_payment(&env, payment_id).ok_or(Error::PaymentNotFound)?;
         payment.status = status;
         payment.updated_at = env.ledger().timestamp();
         store_payment(&env, &payment);
+        Ok(())
+    }
+
+    /// Record a dispute against a payment with reason taxonomy and case reference.
+    pub fn record_dispute(
+        env: Env,
+        payment_id: u64,
+        reason: DisputeReason,
+        case_id: String,
+    ) -> Result<(), Error> {
+        let mut payment = load_payment(&env, payment_id).ok_or(Error::PaymentNotFound)?;
+        payment.status = PaymentStatus::Disputed;
+        payment.dispute_metadata = Some(DisputeMetadata { reason, case_id: case_id.clone(), resolved: false });
+        payment.updated_at = env.ledger().timestamp();
+        store_payment(&env, &payment);
+
+        env.events().publish(
+            (symbol_short!("payment"), symbol_short!("disputed")),
+            (payment_id, case_id),
+        );
+
+        Ok(())
+    }
+
+    /// Mark a disputed payment's case as resolved.
+    pub fn resolve_dispute(env: Env, payment_id: u64) -> Result<(), Error> {
+        let mut payment = load_payment(&env, payment_id).ok_or(Error::PaymentNotFound)?;
+        if let Some(ref mut meta) = payment.dispute_metadata {
+            meta.resolved = true;
+        }
+        payment.updated_at = env.ledger().timestamp();
+        store_payment(&env, &payment);
+
+        env.events().publish(
+            (symbol_short!("payment"), symbol_short!("resolved")),
+            payment_id,
+        );
+
         Ok(())
     }
 
@@ -296,6 +464,66 @@ impl PaymentContract {
     /// Return the total number of payments.
     pub fn get_payment_count(env: Env) -> u64 {
         get_counter(&env)
+    }
+
+    /// Register an earmarked recurring pledge. Execution / transfers are triggered off-chain
+    /// according to `interval_secs`; this stores the commitment and metadata for transparency.
+    pub fn create_pledge(
+        env: Env,
+        donor: Address,
+        amount_per_period: i128,
+        interval_secs: u64,
+        payee_pool: String,
+        cause: String,
+        region: String,
+        emergency_pool: bool,
+    ) -> Result<u64, Error> {
+        donor.require_auth();
+        if amount_per_period <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        if interval_secs == 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let id = get_pledge_counter(&env) + 1;
+        set_pledge_counter(&env, id);
+
+        let pledge = DonationPledge {
+            id,
+            donor: donor.clone(),
+            amount_per_period,
+            interval_secs,
+            payee_pool,
+            cause,
+            region,
+            emergency_pool,
+            active: true,
+            created_at: env.ledger().timestamp(),
+        };
+        store_pledge(&env, &pledge);
+
+        env.events().publish(
+            (symbol_short!("pledge"), symbol_short!("create")),
+            id,
+        );
+
+        Ok(id)
+    }
+
+    pub fn get_pledge(env: Env, pledge_id: u64) -> Result<DonationPledge, Error> {
+        load_pledge(&env, pledge_id).ok_or(Error::PaymentNotFound)
+    }
+
+    pub fn set_pledge_active(env: Env, pledge_id: u64, donor: Address, active: bool) -> Result<(), Error> {
+        donor.require_auth();
+        let mut p = load_pledge(&env, pledge_id).ok_or(Error::PaymentNotFound)?;
+        if p.donor != donor {
+            return Err(Error::NotPledgeDonor);
+        }
+        p.active = active;
+        store_pledge(&env, &p);
+        Ok(())
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────────

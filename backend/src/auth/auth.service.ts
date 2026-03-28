@@ -1,4 +1,4 @@
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 
 import {
   Injectable,
@@ -17,17 +17,22 @@ import { InjectRepository } from '@nestjs/typeorm';
 import Redis from 'ioredis';
 import { Repository } from 'typeorm';
 
-import { REDIS_CLIENT } from '../redis/redis.constants';
-import { RedisCircuitBreaker } from '../redis/redis-circuit-breaker';
-import { AuthSessionFallbackStore } from '../redis/auth-session-fallback.store';
-import { UserEntity } from '../users/entities/user.entity';
 import { ErrorCode } from '../common/errors/error-codes.enum';
+import { AuthSessionFallbackStore } from '../redis/auth-session-fallback.store';
+import { RedisCircuitBreaker } from '../redis/redis-circuit-breaker';
+import { REDIS_CLIENT } from '../redis/redis.constants';
+import { ActivityType } from '../user-activity/enums/activity-type.enum';
+import { UserActivityService } from '../user-activity/user-activity.service';
+import { UserEntity } from '../users/entities/user.entity';
 
 import { JwtPayload } from './jwt.strategy';
-import { hashPassword, verifyPassword } from './utils/password.util';
 import { AuthSessionRepository } from './repositories/auth-session.repository';
-
-const PASSWORD_HISTORY_LIMIT = 3;
+import { validatePasswordStrength } from './utils/password-strength.util';
+import {
+  hashPassword,
+  verifyPassword,
+  dummyVerify,
+} from './utils/password.util';
 
 @Injectable()
 export class AuthService {
@@ -36,6 +41,7 @@ export class AuthService {
   private readonly fallbackStore: AuthSessionFallbackStore;
   private readonly maxFailedLoginAttempts: number;
   private readonly accountLockMinutes: number;
+  private readonly passwordHistoryLength: number;
 
   constructor(
     private readonly jwtService: JwtService,
@@ -44,11 +50,13 @@ export class AuthService {
     @InjectRepository(UserEntity)
     private readonly userRepository: Repository<UserEntity>,
     private readonly authSessionRepository: AuthSessionRepository,
+    private readonly userActivityService: UserActivityService,
   ) {
     this.circuitBreaker = new RedisCircuitBreaker();
     this.fallbackStore = new AuthSessionFallbackStore();
     this.maxFailedLoginAttempts = this.configService.get<number>('MAX_FAILED_LOGIN_ATTEMPTS', 5);
     this.accountLockMinutes = this.configService.get<number>('ACCOUNT_LOCK_MINUTES', 15);
+    this.passwordHistoryLength = this.configService.get<number>('PASSWORD_HISTORY_LENGTH', 3);
   }
 
   async validateUser(
@@ -72,6 +80,7 @@ export class AuthService {
       where: { email: loginDto.email.toLowerCase() },
     });
     if (!user || !user.passwordHash) {
+      await dummyVerify(loginDto.password);
       throw new UnauthorizedException(
         JSON.stringify({
           code: ErrorCode.AUTH_INVALID_CREDENTIALS,
@@ -107,7 +116,7 @@ export class AuthService {
     };
 
     const { accessToken, refreshToken, refreshExpiresInSeconds } =
-      await this.issueTokens(payload);
+      this.issueTokens(payload);
     await this.createSession(user, sessionId, refreshExpiresInSeconds);
     await this.enforceConcurrentSessionLimit(user.id);
 
@@ -123,6 +132,16 @@ export class AuthService {
     role?: string;
     name?: string;
   }) {
+    const strengthCheck = validatePasswordStrength(registerDto.password);
+    if (!strengthCheck.valid) {
+      throw new BadRequestException(
+        JSON.stringify({
+          code: ErrorCode.AUTH_WEAK_PASSWORD,
+          message: strengthCheck.message,
+        }),
+      );
+    }
+
     const email = registerDto.email.toLowerCase();
     const existing = await this.userRepository.findOne({ where: { email } });
     if (existing) {
@@ -159,14 +178,28 @@ export class AuthService {
 
   async refreshToken(refreshToken: string) {
     try {
-      const payload = this.jwtService.verify<JwtPayload>(refreshToken, {
-        secret: this.configService.get<string>(
-          'JWT_REFRESH_SECRET',
-          'refresh-secret',
-        ),
-      });
+      const payload = this.jwtService.verify<JwtPayload & { jti?: string }>(
+        refreshToken,
+        {
+          secret: this.configService.get<string>(
+            'JWT_REFRESH_SECRET',
+            'refresh-secret',
+          ),
+        },
+      );
 
-      const tokenKey = `auth:refresh-consumed:${refreshToken}`;
+      if (!payload.sid) {
+        throw new UnauthorizedException(
+          JSON.stringify({
+            code: ErrorCode.AUTH_INVALID_REFRESH_TOKEN,
+            message: 'Invalid refresh token',
+          }),
+        );
+      }
+
+      // Hash the raw token so the raw value is never stored as a Redis key.
+      const tokenHash = createHash('sha256').update(refreshToken).digest('hex');
+      const tokenKey = `auth:refresh-consumed:${tokenHash}`;
       const expiresAt = payload.exp
         ? payload.exp - Math.floor(Date.now() / 1000)
         : this.getRefreshTokenExpirySeconds();
@@ -191,22 +224,12 @@ export class AuthService {
       );
 
       if (!consumed) {
-        this.logger.warn(
-          `Replay attack detected for user ${payload.email}. Token already consumed.`,
-        );
+        await this.revokeSessionFamily(payload.sub, payload.sid, payload.email);
         throw new UnauthorizedException(
           JSON.stringify({
-            code: ErrorCode.AUTH_INVALID_REFRESH_TOKEN,
-            message: 'Invalid refresh token',
-          }),
-        );
-      }
-
-      if (!payload.sid) {
-        throw new UnauthorizedException(
-          JSON.stringify({
-            code: ErrorCode.AUTH_INVALID_REFRESH_TOKEN,
-            message: 'Invalid refresh token',
+            code: ErrorCode.AUTH_REFRESH_TOKEN_REUSE,
+            message:
+              'Token reuse detected. All sessions have been revoked for your security.',
           }),
         );
       }
@@ -236,7 +259,7 @@ export class AuthService {
         accessToken: newAccessToken,
         refreshToken: newRefreshToken,
         refreshExpiresInSeconds,
-      } = await this.issueTokens(newPayload);
+      } = this.issueTokens(newPayload);
       await this.touchSession(
         payload.sub,
         payload.sid,
@@ -247,11 +270,11 @@ export class AuthService {
         access_token: newAccessToken,
         refresh_token: newRefreshToken,
       };
-    } catch (error) {
+    } catch (error: unknown) {
       if (error instanceof UnauthorizedException) {
         throw error;
       }
-      this.logger.error(`Refresh token failed: ${error.message}`);
+      this.logger.error(`Refresh token failed: ${(error as Error).message}`);
       throw new UnauthorizedException(
         JSON.stringify({
           code: ErrorCode.AUTH_INVALID_REFRESH_TOKEN,
@@ -261,15 +284,15 @@ export class AuthService {
     }
   }
 
-  private async issueTokens(payload: JwtPayload): Promise<{
+  private issueTokens(payload: JwtPayload): {
     accessToken: string;
     refreshToken: string;
     refreshExpiresInSeconds: number;
-  }> {
+  } {
     const accessToken = this.jwtService.sign(
       payload as unknown as Record<string, unknown>,
     );
-    const refreshToken = await this.generateRefreshToken(payload);
+    const refreshToken = this.generateRefreshToken(payload);
     return {
       accessToken,
       refreshToken,
@@ -277,23 +300,20 @@ export class AuthService {
     };
   }
 
-  private async generateRefreshToken(payload: JwtPayload): Promise<string> {
+  private generateRefreshToken(payload: JwtPayload): string {
     const jti = randomBytes(16).toString('hex');
     const refreshExpiresIn =
       this.configService.get<string>('JWT_REFRESH_EXPIRES_IN') ?? '7d';
 
-    const refreshToken = this.jwtService.sign(
+    return this.jwtService.sign(
       { ...payload, jti } as unknown as Record<string, unknown>,
       {
         secret:
           this.configService.get<string>('JWT_REFRESH_SECRET') ??
           'refresh-secret',
-
-        expiresIn: refreshExpiresIn as any,
+        expiresIn: refreshExpiresIn,
       },
     );
-
-    return refreshToken;
   }
 
   async logout(userId: string, sessionId?: string) {
@@ -321,6 +341,53 @@ export class AuthService {
       sessionIds.map((sid) => this.getSessionById(sid)),
     );
     return sessions.filter((session) => session && !session.revokedAt);
+  }
+
+  /**
+   * Revokes all Redis session state and DB record for a session family.
+   * Called when a refresh token replay is detected — the entire session is
+   * considered compromised regardless of which token in the family was reused.
+   */
+  private async revokeSessionFamily(
+    userId: string,
+    sessionId: string,
+    email: string,
+  ): Promise<void> {
+    const auditReason = JSON.stringify({
+      event: 'REFRESH_TOKEN_REUSE',
+      detectedAt: new Date().toISOString(),
+      email,
+    });
+
+    this.logger.warn(
+      `Token family compromise detected for user ${email} (session ${sessionId}). Revoking session.`,
+    );
+
+    // Revoke in Redis
+    await this.circuitBreaker.execute(
+      async () => {
+        await this.redis.hset(
+          this.sessionKey(sessionId),
+          'revokedAt',
+          new Date().toISOString(),
+          'revocationReason',
+          auditReason,
+        );
+        await this.redis.zrem(this.userSessionsKey(userId), sessionId);
+      },
+      async () => {
+        await this.fallbackStore.revokeSession(sessionId);
+      },
+    );
+
+    // Persist audit log entry to DB
+    try {
+      await this.authSessionRepository.revokeSession(sessionId, auditReason);
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Failed to persist family revocation audit log: ${(err as Error).message}`,
+      );
+    }
   }
 
   async revokeSession(userId: string, sessionId: string) {
@@ -352,9 +419,9 @@ export class AuthService {
     // Persist revocation to database
     try {
       await this.authSessionRepository.revokeSession(sessionId, 'User logout');
-    } catch (error) {
+    } catch (error: unknown) {
       this.logger.warn(
-        `Failed to persist session revocation to database: ${error.message}`,
+        `Failed to persist session revocation to database: ${(error as Error).message}`,
       );
     }
 
@@ -376,6 +443,19 @@ export class AuthService {
     user.lockedUntil = null;
     await this.userRepository.save(user);
 
+    this.userActivityService
+      .logActivity({
+        userId: user.id,
+        activityType: ActivityType.AUTH_ACCOUNT_MANUALLY_UNLOCKED,
+        description: `Account manually unlocked by admin for ${user.email}`,
+        metadata: { email: user.email, unlockedBy: 'admin' },
+      })
+      .catch((err: unknown) =>
+        this.logger.warn(
+          `Failed to log manual unlock event: ${(err as Error).message}`,
+        ),
+      );
+
     return { message: 'Account unlocked successfully' };
   }
 
@@ -389,6 +469,16 @@ export class AuthService {
         JSON.stringify({
           code: ErrorCode.AUTH_PASSWORD_SAME_AS_OLD,
           message: 'New password must be different from old password',
+        }),
+      );
+    }
+
+    const strengthCheck = validatePasswordStrength(newPassword);
+    if (!strengthCheck.valid) {
+      throw new BadRequestException(
+        JSON.stringify({
+          code: ErrorCode.AUTH_WEAK_PASSWORD,
+          message: strengthCheck.message,
         }),
       );
     }
@@ -419,13 +509,13 @@ export class AuthService {
     const recentHashes = [
       user.passwordHash,
       ...(user.passwordHistory ?? []),
-    ].slice(0, PASSWORD_HISTORY_LIMIT);
+    ].slice(0, this.passwordHistoryLength);
     for (const hash of recentHashes) {
       if (await verifyPassword(newPassword, hash)) {
         throw new BadRequestException(
           JSON.stringify({
             code: ErrorCode.AUTH_PASSWORD_REUSE,
-            message: `Cannot reuse any of your last ${PASSWORD_HISTORY_LIMIT} passwords`,
+            message: `Cannot reuse any of your last ${this.passwordHistoryLength} passwords`,
           }),
         );
       }
@@ -435,7 +525,7 @@ export class AuthService {
     user.passwordHistory = [
       user.passwordHash,
       ...(user.passwordHistory ?? []),
-    ].slice(0, PASSWORD_HISTORY_LIMIT);
+    ].slice(0, this.passwordHistoryLength);
     user.passwordHash = newHash;
     await this.userRepository.save(user);
 
@@ -453,6 +543,18 @@ export class AuthService {
       user.lockedUntil = null;
       user.failedLoginAttempts = 0;
       await this.userRepository.save(user);
+      this.userActivityService
+        .logActivity({
+          userId: user.id,
+          activityType: ActivityType.AUTH_ACCOUNT_AUTO_UNLOCKED,
+          description: `Account auto-unlocked after lock expiry for ${user.email}`,
+          metadata: { email: user.email },
+        })
+        .catch((err: unknown) =>
+          this.logger.warn(
+            `Failed to log auto-unlock event: ${(err as Error).message}`,
+          ),
+        );
       return;
     }
 
@@ -468,8 +570,28 @@ export class AuthService {
     user.failedLoginAttempts = (user.failedLoginAttempts ?? 0) + 1;
     if (user.failedLoginAttempts >= this.maxFailedLoginAttempts) {
       const lockedUntil = new Date();
-      lockedUntil.setMinutes(lockedUntil.getMinutes() + this.accountLockMinutes);
+      lockedUntil.setMinutes(
+        lockedUntil.getMinutes() + this.accountLockMinutes,
+      );
       user.lockedUntil = lockedUntil;
+      await this.userRepository.save(user);
+      this.userActivityService
+        .logActivity({
+          userId: user.id,
+          activityType: ActivityType.AUTH_ACCOUNT_LOCKED,
+          description: `Account locked after ${user.failedLoginAttempts} failed login attempts for ${user.email}`,
+          metadata: {
+            email: user.email,
+            failedAttempts: user.failedLoginAttempts,
+            lockedUntil,
+          },
+        })
+        .catch((err: unknown) =>
+          this.logger.warn(
+            `Failed to log account lock event: ${(err as Error).message}`,
+          ),
+        );
+      return;
     }
     await this.userRepository.save(user);
   }
@@ -522,9 +644,9 @@ export class AuthService {
         role: user.role,
         expiresAt: new Date(Date.now() + ttlSeconds * 1000),
       });
-    } catch (error) {
+    } catch (error: unknown) {
       this.logger.warn(
-        `Failed to persist session to database: ${error.message}`,
+        `Failed to persist session to database: ${(error as Error).message}`,
       );
     }
   }
@@ -551,9 +673,9 @@ export class AuthService {
 
     try {
       await this.authSessionRepository.updateLastActivity(sessionId);
-    } catch (error) {
+    } catch (error: unknown) {
       this.logger.warn(
-        `Failed to update session activity in DB: ${error.message}`,
+        `Failed to update session activity in DB: ${(error as Error).message}`,
       );
     }
   }
@@ -594,13 +716,22 @@ export class AuthService {
   }
 
   private async enforceConcurrentSessionLimit(userId: string) {
-    const maxSessions = this.configService.get<number>('MAX_CONCURRENT_SESSIONS', 5);
-    const sessionIds = await this.redis.zrange(this.userSessionsKey(userId), 0, -1);
-    
+    const maxSessions = this.configService.get<number>(
+      'MAX_CONCURRENT_SESSIONS',
+      5,
+    );
+    const sessionIds = await this.redis.zrange(
+      this.userSessionsKey(userId),
+      0,
+      -1,
+    );
+
     if (sessionIds.length > maxSessions) {
       const toRevoke = sessionIds.slice(0, sessionIds.length - maxSessions);
-      await Promise.all(toRevoke.map(sid => this.revokeSession(userId, sid)));
-      this.logger.log(`Enforced session limit for user ${userId}, revoked ${toRevoke.length} sessions`);
+      await Promise.all(toRevoke.map((sid) => this.revokeSession(userId, sid)));
+      this.logger.log(
+        `Enforced session limit for user ${userId}, revoked ${toRevoke.length} sessions`,
+      );
     }
   }
 
@@ -617,7 +748,7 @@ export class AuthService {
         }),
       );
     }
-    
+
     this.logger.log(`Admin revoking all sessions for user: ${userId}`);
 
     // 1. Get all session IDs from Redis
