@@ -5,6 +5,7 @@ import { DisputeReasonTaxonomy, DisputeSeverity, DisputeStatus } from '../enums/
 @Entity('disputes')
 @Index(['orderId'])
 @Index(['status'])
+@Index(['status', 'createdAt'])
 export class DisputeEntity extends BaseEntity {
   @Column({ name: 'order_id', nullable: true, type: 'varchar' })
   orderId: string | null;

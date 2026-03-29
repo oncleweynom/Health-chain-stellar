@@ -1,5 +1,8 @@
-import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Res } from '@nestjs/common';
+import { Response } from 'express';
 import { User } from '../auth/decorators/user.decorator';
+import { RequirePermissions } from '../auth/decorators/require-permissions.decorator';
+import { Permission } from '../auth/enums/permission.enum';
 import { DisputesService } from './disputes.service';
 import { AddNoteDto, AssignDisputeDto, OpenDisputeDto, ResolveDisputeDto } from './dto/dispute.dto';
 import { DisputeSeverity, DisputeStatus } from './enums/dispute.enum';
@@ -18,8 +21,21 @@ export class DisputesController {
     @Query('status') status?: DisputeStatus,
     @Query('severity') severity?: DisputeSeverity,
     @Query('assignedTo') assignedTo?: string,
+    @Query('cursor') cursor?: string,
+    @Query('limit') limit?: string,
   ) {
-    return this.service.list({ status, severity, assignedTo });
+    return this.service.list({ status, severity, assignedTo, cursor, limit: limit ? parseInt(limit, 10) : undefined });
+  }
+
+  @RequirePermissions(Permission.EXPORT_DISPUTES)
+  @Get('export')
+  async export(
+    @Res() res: Response,
+    @Query('status') status?: DisputeStatus,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.service.streamCsvExport(res, { status, from, to });
   }
 
   @Get(':id')

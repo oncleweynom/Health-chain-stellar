@@ -1,11 +1,29 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-
+import { Response } from 'express';
+import * as fastcsv from 'fast-csv';
 import { DisputeEntity } from './entities/dispute.entity';
 import { DisputeNoteEntity } from './entities/dispute-note.entity';
-import { OpenDisputeDto, ResolveDisputeDto, AddNoteDto } from './dto/dispute.dto';
 import { DisputeSeverity, DisputeStatus } from './enums/dispute.enum';
+import { OpenDisputeDto } from './dto/dispute.dto';
+import { ResolveDisputeDto } from './dto/dispute.dto';
+
+const MAX_LIMIT = 100;
+const CURSOR_SECRET = process.env.CURSOR_SECRET ?? 'disputes-cursor-secret';
+
+function encodeCursor(createdAt: Date, id: string): string {
+  const payload = JSON.stringify({ t: createdAt.toISOString(), id });
+  return Buffer.from(payload).toString('base64url');
+}
+
+function decodeCursor(cursor: string): { t: string; id: string } | null {
+  try {
+    return JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
 
 @Injectable()
 export class DisputesService {
@@ -29,12 +47,41 @@ export class DisputesService {
     return this.disputeRepo.save(dispute);
   }
 
-  async list(filters: { status?: DisputeStatus; severity?: DisputeSeverity; assignedTo?: string }): Promise<DisputeEntity[]> {
-    const where: Record<string, unknown> = {};
-    if (filters.status) where.status = filters.status;
-    if (filters.severity) where.severity = filters.severity;
-    if (filters.assignedTo) where.assignedTo = filters.assignedTo;
-    return this.disputeRepo.find({ where, order: { createdAt: 'DESC' } });
+  async list(filters: {
+    status?: DisputeStatus;
+    severity?: DisputeSeverity;
+    assignedTo?: string;
+    cursor?: string;
+    limit?: number;
+  }): Promise<{ data: DisputeEntity[]; nextCursor: string | null }> {
+    const limit = Math.min(filters.limit ?? 20, MAX_LIMIT);
+    const qb = this.disputeRepo.createQueryBuilder('d');
+
+    if (filters.status) qb.andWhere('d.status = :status', { status: filters.status });
+    if (filters.severity) qb.andWhere('d.severity = :severity', { severity: filters.severity });
+    if (filters.assignedTo) qb.andWhere('d.assignedTo = :assignedTo', { assignedTo: filters.assignedTo });
+
+    if (filters.cursor) {
+      const decoded = decodeCursor(filters.cursor);
+      if (decoded) {
+        qb.andWhere(
+          '(d.createdAt, d.id) < (:t::timestamptz, :id)',
+          { t: decoded.t, id: decoded.id },
+        );
+      }
+    }
+
+    const rows = await qb
+      .orderBy('d.createdAt', 'DESC')
+      .addOrderBy('d.id', 'DESC')
+      .limit(limit + 1)
+      .getMany();
+
+    const hasMore = rows.length > limit;
+    const data = hasMore ? rows.slice(0, limit) : rows;
+    const nextCursor = hasMore ? encodeCursor(data[data.length - 1].createdAt, data[data.length - 1].id) : null;
+
+    return { data, nextCursor };
   }
 
   async get(id: string): Promise<DisputeEntity> {
@@ -59,7 +106,7 @@ export class DisputesService {
   }
 
   async addNote(id: string, content: string, authorId: string): Promise<DisputeNoteEntity> {
-    await this.get(id); // ensure exists
+    await this.get(id);
     return this.noteRepo.save(this.noteRepo.create({ disputeId: id, content, authorId }));
   }
 
@@ -72,5 +119,56 @@ export class DisputesService {
     const existing = d.evidence ?? [];
     d.evidence = [...existing, { ...evidence, addedAt: new Date().toISOString() }];
     return this.disputeRepo.save(d);
+  }
+
+  async streamCsvExport(
+    res: Response,
+    filters: { status?: DisputeStatus; from?: string; to?: string },
+  ): Promise<void> {
+    const qb = this.disputeRepo
+      .createQueryBuilder('d')
+      .select([
+        'd.id', 'd.orderId', 'd.paymentId', 'd.reason', 'd.severity',
+        'd.status', 'd.openedBy', 'd.assignedTo', 'd.createdAt', 'd.resolvedAt',
+      ])
+      .orderBy('d.createdAt', 'ASC');
+
+    if (filters.status) qb.andWhere('d.status = :status', { status: filters.status });
+    if (filters.from) qb.andWhere('d.createdAt >= :from', { from: filters.from });
+    if (filters.to) qb.andWhere('d.createdAt <= :to', { to: filters.to });
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="disputes.csv"');
+
+    const csvStream = fastcsv.format({ headers: true });
+    csvStream.pipe(res);
+
+    const BATCH = 500;
+    let offset = 0;
+
+    while (true) {
+      const rows = await qb.skip(offset).take(BATCH).getMany();
+      if (rows.length === 0) break;
+
+      for (const r of rows) {
+        csvStream.write({
+          id: r.id,
+          orderId: r.orderId ?? '',
+          paymentId: r.paymentId ?? '',
+          reason: r.reason,
+          severity: r.severity,
+          status: r.status,
+          openedBy: r.openedBy,
+          assignedTo: r.assignedTo ?? '',
+          createdAt: r.createdAt.toISOString(),
+          resolvedAt: r.resolvedAt?.toISOString() ?? '',
+        });
+      }
+
+      if (rows.length < BATCH) break;
+      offset += BATCH;
+    }
+
+    csvStream.end();
   }
 }
