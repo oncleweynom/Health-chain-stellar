@@ -40,6 +40,24 @@ export interface FulfillmentProgress {
   itemsFulfilledCount: number;
 }
 
+export interface TriageFactorSnapshot {
+  policyVersion: string;
+  urgency: number;
+  criticality: number;
+  quantity: number;
+  time: number;
+  scarcity: number;
+  inventoryPressure: number;
+  emergencyOverride: boolean;
+  raw: {
+    requestedUnits: number;
+    availableUnits: number;
+    hoursUntilRequiredBy: number;
+    itemPriority: string;
+    urgency: RequestUrgency;
+  };
+}
+
 @Entity('blood_requests')
 @Index('idx_blood_requests_hospital', ['hospitalId'])
 @Index('idx_blood_requests_status', ['status'])
@@ -104,6 +122,20 @@ export class BloodRequestEntity {
     default: EscalationTier.NONE,
   })
   escalationTier: EscalationTier;
+
+  @Column({ name: 'triage_score', type: 'int', default: 0 })
+  triageScore: number;
+
+  @Column({
+    name: 'triage_policy_version',
+    type: 'varchar',
+    length: 32,
+    default: '2026-03-30.v1',
+  })
+  triagePolicyVersion: string;
+
+  @Column({ name: 'triage_factors', type: 'simple-json', nullable: true })
+  triageFactors: TriageFactorSnapshot | null;
 
   @OneToMany(() => BloodRequestItemEntity, (item) => item.request, {
     cascade: true,

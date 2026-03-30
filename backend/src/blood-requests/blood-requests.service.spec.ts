@@ -9,11 +9,13 @@ import {
 } from '../common/errors/app-errors';
 import { InventoryService } from '../inventory/inventory.service';
 import { EmailProvider } from '../notifications/providers/email.provider';
+import { PermissionsService } from '../auth/permissions.service';
 
 import { BloodRequestsService } from './blood-requests.service';
 import { BloodRequestItemEntity } from './entities/blood-request-item.entity';
 import { BloodRequestEntity } from './entities/blood-request.entity';
 import { BloodRequestStatus } from './enums/blood-request-status.enum';
+import { TriageScoringService } from './services/triage-scoring.service';
 
 const mockBloodRequestRepo = {
   exist: jest.fn().mockResolvedValue(false),
@@ -30,6 +32,9 @@ const mockBloodRequestItemRepo = {
 };
 
 const mockInventoryService = {
+  findByBankAndBloodType: jest
+    .fn()
+    .mockResolvedValue({ availableUnits: 10, version: 1 }),
   reserveStockOrThrow: jest.fn().mockResolvedValue(undefined),
   releaseStockByBankAndType: jest.fn().mockResolvedValue(undefined),
 };
@@ -53,6 +58,10 @@ const mockCompensationService = {
     failed: [],
     failureRecordId: 'record-uuid',
   }),
+};
+
+const mockPermissionsService = {
+  assertIsAdminOrSelf: jest.fn(),
 };
 
 const validDto = {
@@ -85,6 +94,8 @@ describe('BloodRequestsService', () => {
         { provide: SorobanService, useValue: mockSorobanService },
         { provide: EmailProvider, useValue: mockEmailProvider },
         { provide: CompensationService, useValue: mockCompensationService },
+        { provide: PermissionsService, useValue: mockPermissionsService },
+        TriageScoringService,
       ],
     }).compile();
 
@@ -104,6 +115,15 @@ describe('BloodRequestsService', () => {
         expect.objectContaining({ contractMethod: 'create_blood_request' }),
       );
       expect(mockBloodRequestRepo.save).toHaveBeenCalled();
+      expect(mockBloodRequestRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          triageScore: expect.any(Number),
+          triagePolicyVersion: expect.any(String),
+          triageFactors: expect.objectContaining({
+            policyVersion: expect.any(String),
+          }),
+        }),
+      );
       expect(mockEmailProvider.send).toHaveBeenCalled();
       expect(result.data.status).toBe(BloodRequestStatus.PENDING);
       expect(result.data.blockchainTxHash).toBe('tx-hash-abc');

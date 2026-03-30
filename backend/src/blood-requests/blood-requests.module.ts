@@ -17,6 +17,7 @@ import { BloodRequestReservationEntity } from './entities/blood-request-reservat
 import { RequestQueryService } from './services/request-query.service';
 import { BloodBankAvailabilityService } from './services/blood-bank-availability.service';
 import { BloodRequestReservationService } from './services/blood-request-reservation.service';
+import { TriageScoringService } from './services/triage-scoring.service';
 import { InventoryStockEntity } from '../inventory/entities/inventory-stock.entity';
 
 @Module({
@@ -40,12 +41,14 @@ import { InventoryStockEntity } from '../inventory/entities/inventory-stock.enti
     RequestQueryService,
     BloodBankAvailabilityService,
     BloodRequestReservationService,
+    TriageScoringService,
   ],
   exports: [
     BloodRequestsService,
     RequestQueryService,
     BloodBankAvailabilityService,
     BloodRequestReservationService,
+    TriageScoringService,
   ],
 })
 export class BloodRequestsModule {}

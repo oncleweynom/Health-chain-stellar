@@ -17,9 +17,13 @@ import { InventoryService } from '../inventory/inventory.service';
 import { EmailProvider } from '../notifications/providers/email.provider';
 
 import { CreateBloodRequestDto } from './dto/create-blood-request.dto';
-import { BloodRequestItemEntity } from './entities/blood-request-item.entity';
-import { BloodRequestEntity } from './entities/blood-request.entity';
+import {
+  BloodRequestItemEntity,
+  ItemPriority,
+} from './entities/blood-request-item.entity';
+import { BloodRequestEntity, RequestUrgency } from './entities/blood-request.entity';
 import { BloodRequestStatus } from './enums/blood-request-status.enum';
+import { TriageScoringService } from './services/triage-scoring.service';
 
 type RequestUser = { id: string; role: string; email: string };
 
@@ -37,6 +41,7 @@ export class BloodRequestsService {
     private readonly emailProvider: EmailProvider,
     private readonly compensationService: CompensationService,
     private readonly permissionsService: PermissionsService,
+    private readonly triageScoringService: TriageScoringService,
   ) {}
 
   private assertHospitalAuthorization(
@@ -109,6 +114,9 @@ export class BloodRequestsService {
       bloodType: string;
       quantity: number;
     }> = [];
+    let totalAvailableUnits = 0;
+    let totalRequestedUnits = 0;
+    let highestPriority = ItemPriority.LOW;
 
     try {
       for (const item of dto.items) {
@@ -119,6 +127,17 @@ export class BloodRequestsService {
         if (!quantity) {
           throw new BadRequestException('Item quantity must be specified as quantityMl or quantity');
         }
+
+        const stock = await this.inventoryService.findByBankAndBloodType(
+          bloodBankId,
+          bloodType,
+        );
+        totalAvailableUnits += stock?.availableUnits ?? 0;
+        totalRequestedUnits += quantity;
+        highestPriority = this.pickHigherPriority(
+          highestPriority,
+          item.priority || ItemPriority.NORMAL,
+        );
 
         await this.inventoryService.reserveStockOrThrow(
           bloodBankId,
@@ -214,17 +233,30 @@ export class BloodRequestsService {
         throw irrecoverableErr;
       }
 
+      const triage = this.triageScoringService.compute({
+        urgency: dto.urgency || RequestUrgency.ROUTINE,
+        itemPriority: highestPriority,
+        requestedUnits: totalRequestedUnits,
+        availableUnits: totalAvailableUnits,
+        requiredByTimestamp: Math.floor(requiredBy.getTime() / 1000),
+        currentTimestamp: Math.floor(Date.now() / 1000),
+        emergencyOverride: false,
+      });
+
       const parent = this.bloodRequestRepo.create({
         requestNumber,
         hospitalId: dto.hospitalId,
         requiredByTimestamp: Math.floor(requiredBy.getTime() / 1000),
         createdTimestamp: Math.floor(Date.now() / 1000),
-        urgency: dto.urgency || 'ROUTINE',
+        urgency: dto.urgency || RequestUrgency.ROUTINE,
         deliveryAddress: dto.deliveryAddress?.trim() ?? null,
         notes: dto.notes?.trim() ?? null,
         status: BloodRequestStatus.PENDING,
         blockchainTxHash: transactionHash,
         createdByUserId: user.id,
+        triageScore: triage.score,
+        triagePolicyVersion: triage.policyVersion,
+        triageFactors: triage.factors,
         items: dto.items.map((i) =>
           this.bloodRequestItemRepo.create({
             bloodType: i.bloodType.trim(),
@@ -253,6 +285,20 @@ export class BloodRequestsService {
       }
       throw err;
     }
+  }
+
+  private pickHigherPriority(
+    current: ItemPriority,
+    next: ItemPriority,
+  ): ItemPriority {
+    const rank: Record<ItemPriority, number> = {
+      [ItemPriority.LOW]: 0,
+      [ItemPriority.NORMAL]: 1,
+      [ItemPriority.HIGH]: 2,
+      [ItemPriority.CRITICAL]: 3,
+    };
+
+    return rank[next] > rank[current] ? next : current;
   }
 
   private async sendCreationEmail(
