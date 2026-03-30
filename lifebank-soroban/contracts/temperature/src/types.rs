@@ -46,4 +46,5 @@ pub enum DataKey {
     ConsecutiveViolationStreak(u64),
     /// Tracks if unit has been compromised (3+ consecutive violations)
     IsCompromised(u64),
+    Paused,
 }

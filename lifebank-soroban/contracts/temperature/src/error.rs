@@ -9,4 +9,5 @@ pub enum ContractError {
     ThresholdNotFound = 602,
     InvalidThreshold = 603,
     AlreadyInitialized = 604,
+    ContractPaused = 605,
 }

@@ -71,6 +71,26 @@ pub struct Dispute {
     pub resolved_at: Option<u64>,
 }
 
+/// Proof bundle attached to a payment for escrow release
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProofBundle {
+    /// SHA-256 hash of the delivery proof record (32 bytes)
+    pub delivery_hash: Bytes,
+    /// SHA-256 hash of the recipient signature artifact (32 bytes)
+    pub signature_hash: Bytes,
+    /// SHA-256 hash of the photo evidence (32 bytes)
+    pub photo_hash: Bytes,
+    /// SHA-256 hash of the medical verification record (32 bytes)
+    pub medical_hash: Bytes,
+    /// Address of the actor who submitted the bundle
+    pub submitted_by: Address,
+    /// Timestamp when the bundle was attached
+    pub submitted_at: u64,
+    /// Whether the bundle passed backend validation
+    pub validated: bool,
+}
+
 /// Conditions that must be met before escrow funds can be released
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,6 +101,8 @@ pub struct ReleaseConditions {
     pub min_timestamp: u64,
     /// Optional address authorized to approve release
     pub authorized_approver: Option<Address>,
+    /// Whether a validated proof bundle is required before release
+    pub require_proof_bundle: bool,
 }
 
 /// Core payment transaction structure
@@ -105,6 +127,8 @@ pub struct Payment {
     pub status: PaymentStatus,
     /// Timestamp when escrow was released (if applicable)
     pub escrow_released_at: Option<u64>,
+    /// Proof bundle attached for escrow release (if any)
+    pub proof_bundle: Option<ProofBundle>,
 }
 
 /// Escrow account holding locked funds
@@ -239,7 +263,7 @@ impl EscrowAccount {
     }
 
     /// Checks if release conditions are satisfied
-    pub fn can_release(&self, current_timestamp: u64, approver: Option<&Address>) -> bool {
+    pub fn can_release(&self, current_timestamp: u64, approver: Option<&Address>, proof_bundle: Option<&ProofBundle>) -> bool {
         // Check timestamp condition
         if current_timestamp < self.release_conditions.min_timestamp {
             return false;
@@ -258,6 +282,14 @@ impl EscrowAccount {
                 }
             } else {
                 return false;
+            }
+        }
+
+        // Check proof bundle requirement
+        if self.release_conditions.require_proof_bundle {
+            match proof_bundle {
+                Some(bundle) if bundle.validated => {}
+                _ => return false,
             }
         }
 
@@ -360,4 +392,8 @@ pub enum PaymentError {
     EscrowNotReleasable,
     InvalidMultiSigConfig,
     DuplicateApproval,
+    /// Escrow release requires a proof bundle but none was provided
+    ProofBundleMissing,
+    /// Proof bundle exists but has not been validated
+    ProofBundleInvalid,
 }

@@ -1574,3 +1574,84 @@ fn test_attack_paused_contract_write_must_fail() {
         "Write operation on paused (no-admin) contract must be rejected"
     );
 }
+
+// ── Circuit breaker tests ─────────────────────────────────────────────────────
+
+fn setup_identity<'a>() -> (Env, IdentityContractClient<'a>, Address) {
+    let env = Env::default();
+    env.mock_all_auths();
+    let cid = env.register(IdentityContract, ());
+    let client = IdentityContractClient::new(&env, &cid);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    (env, client, admin)
+}
+
+#[test]
+fn test_identity_pause_blocks_register_organization() {
+    let (env, client, admin) = setup_identity();
+    client.pause(&admin);
+    assert!(client.is_paused());
+
+    let owner = Address::generate(&env);
+    let loc: BytesN<32> = BytesN::from_array(&env, &[0u8; 32]);
+    let result = client.try_register_organization(
+        &owner,
+        &OrgType::BloodBank,
+        &String::from_str(&env, "Test Bank"),
+        &String::from_str(&env, "LIC-001"),
+        &loc,
+        &soroban_sdk::vec![&env],
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_identity_pause_allows_get_organization() {
+    let (env, client, admin) = setup_identity();
+
+    let owner = Address::generate(&env);
+    let loc: BytesN<32> = BytesN::from_array(&env, &[0u8; 32]);
+    let org_id = client.register_organization(
+        &owner,
+        &OrgType::BloodBank,
+        &String::from_str(&env, "Test Bank"),
+        &String::from_str(&env, "LIC-001"),
+        &loc,
+        &soroban_sdk::vec![&env],
+    );
+
+    client.pause(&admin);
+
+    // Read still works
+    let org = client.get_organization(&org_id);
+    assert!(org.is_some());
+}
+
+#[test]
+fn test_identity_unpause_restores_writes() {
+    let (env, client, admin) = setup_identity();
+    client.pause(&admin);
+    client.unpause(&admin);
+    assert!(!client.is_paused());
+
+    let owner = Address::generate(&env);
+    let loc: BytesN<32> = BytesN::from_array(&env, &[0u8; 32]);
+    let org_id = client.register_organization(
+        &owner,
+        &OrgType::Hospital,
+        &String::from_str(&env, "City Hospital"),
+        &String::from_str(&env, "LIC-002"),
+        &loc,
+        &soroban_sdk::vec![&env],
+    );
+    assert!(!org_id.to_string().is_empty());
+}
+
+#[test]
+#[should_panic]
+fn test_identity_non_admin_cannot_pause() {
+    let (env, client, _admin) = setup_identity();
+    let attacker = Address::generate(&env);
+    client.pause(&attacker);
+}

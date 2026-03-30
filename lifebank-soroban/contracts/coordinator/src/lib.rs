@@ -181,6 +181,56 @@ impl CoordinatorContract {
         Ok(())
     }
 
+    /// Pause all state-mutating functions. Admin only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), CoordinatorError> {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CoordinatorError::Unauthorized)?;
+        if admin != stored {
+            return Err(CoordinatorError::Unauthorized);
+        }
+        env.storage().instance().set(&DataKey::Paused, &true);
+        Ok(())
+    }
+
+    /// Unpause the contract. Admin only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), CoordinatorError> {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CoordinatorError::Unauthorized)?;
+        if admin != stored {
+            return Err(CoordinatorError::Unauthorized);
+        }
+        env.storage().instance().set(&DataKey::Paused, &false);
+        Ok(())
+    }
+
+    /// Returns whether the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), CoordinatorError> {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            return Err(CoordinatorError::ContractPaused);
+        }
+        Ok(())
+    }
+
     /// Step 1 – Allocate inventory units to a pending request.
     pub fn allocate_units(
         env: Env,
@@ -191,6 +241,7 @@ impl CoordinatorContract {
     ) -> Result<(), CoordinatorError> {
         caller.require_auth();
         Self::require_initialized(&env)?;
+        Self::require_not_paused(&env)?;
 
         if let Some(wf) = load_workflow(&env, request_id) {
             if wf.status != WorkflowStatus::Pending {
@@ -267,6 +318,7 @@ impl CoordinatorContract {
     ) -> Result<(), CoordinatorError> {
         caller.require_auth();
         Self::require_initialized(&env)?;
+        Self::require_not_paused(&env)?;
 
         let mut wf =
             load_workflow(&env, request_id).ok_or(CoordinatorError::WorkflowNotFound)?;
@@ -317,6 +369,7 @@ impl CoordinatorContract {
     ) -> Result<(), CoordinatorError> {
         caller.require_auth();
         Self::require_initialized(&env)?;
+        Self::require_not_paused(&env)?;
 
         let mut wf =
             load_workflow(&env, request_id).ok_or(CoordinatorError::WorkflowNotFound)?;
@@ -361,6 +414,7 @@ impl CoordinatorContract {
     pub fn rollback(env: Env, request_id: u64) -> Result<(), CoordinatorError> {
         get_admin(&env).require_auth();
         Self::require_initialized(&env)?;
+        Self::require_not_paused(&env)?;
 
         let mut wf =
             load_workflow(&env, request_id).ok_or(CoordinatorError::WorkflowNotFound)?;

@@ -19,6 +19,7 @@ import {
   Upload,
   Droplets,
   FlaskConical,
+  BadgeDollarSign,
 } from "lucide-react";
 
 function classNames(...classes: (string | undefined | null | false)[]) {
@@ -37,6 +38,7 @@ const sidebarLinks = [
   { name: "Policy Center", href: "/admin/policy-center", icon: Settings },
   { name: "Batch Import", href: "/admin/batch-import", icon: Upload },
   { name: "Expiration Forecast", href: "/admin/expiration-forecast", icon: Droplets },
+  { name: "Settlement Review", href: "/dashboard/settlement", icon: BadgeDollarSign },
 ];
 
 export default function DashboardLayout({

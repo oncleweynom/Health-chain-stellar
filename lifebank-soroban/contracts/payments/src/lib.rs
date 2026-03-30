@@ -117,12 +117,16 @@ pub enum Error {
     InvalidPage = 503,
     NotPledgeDonor = 504,
     InsufficientEscrowFunds = 505,
+    Unauthorized = 506,
+    ContractPaused = 507,
 }
 
 // ── Storage keys ───────────────────────────────────────────────────────────────
 
 const PAYMENT_COUNTER: soroban_sdk::Symbol = symbol_short!("PAY_CTR");
 const PLEDGE_COUNTER: soroban_sdk::Symbol = symbol_short!("PLG_CTR");
+const ADMIN_KEY: soroban_sdk::Symbol = symbol_short!("ADMIN");
+const PAUSED_KEY: soroban_sdk::Symbol = symbol_short!("PAUSED");
 
 /// Build a storage key for a payment by encoding its numeric id into a Symbol.
 /// Uses a (u64, &str) tuple as the composite key to avoid Symbol length limits.
@@ -176,6 +180,66 @@ pub struct PaymentContract;
 
 #[contractimpl]
 impl PaymentContract {
+    /// Initialize the contract and set the admin.
+    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+        if env.storage().instance().has(&ADMIN_KEY) {
+            return Err(Error::Unauthorized);
+        }
+        env.storage().instance().set(&ADMIN_KEY, &admin);
+        Ok(())
+    }
+
+    /// Pause all state-mutating functions. Admin only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN_KEY)
+            .ok_or(Error::Unauthorized)?;
+        if admin != stored {
+            return Err(Error::Unauthorized);
+        }
+        env.storage().instance().set(&PAUSED_KEY, &true);
+        Ok(())
+    }
+
+    /// Unpause the contract. Admin only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN_KEY)
+            .ok_or(Error::Unauthorized)?;
+        if admin != stored {
+            return Err(Error::Unauthorized);
+        }
+        env.storage().instance().set(&PAUSED_KEY, &false);
+        Ok(())
+    }
+
+    /// Returns whether the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&PAUSED_KEY)
+            .unwrap_or(false)
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), Error> {
+        if env
+            .storage()
+            .instance()
+            .get(&PAUSED_KEY)
+            .unwrap_or(false)
+        {
+            return Err(Error::ContractPaused);
+        }
+        Ok(())
+    }
+
     /// Create a new payment record.
     pub fn create_payment(
         env: Env,
@@ -184,6 +248,7 @@ impl PaymentContract {
         payee: Address,
         amount: i128,
     ) -> Result<u64, Error> {
+        Self::require_not_paused(&env)?;
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
@@ -238,6 +303,7 @@ impl PaymentContract {
         amount: i128,
         token: Address,
     ) -> Result<u64, Error> {
+        Self::require_not_paused(&env)?;
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
@@ -287,6 +353,7 @@ impl PaymentContract {
 
     /// Update payment status (internal helper exposed for testing).
     pub fn update_status(env: Env, payment_id: u64, status: PaymentStatus) -> Result<(), Error> {
+        Self::require_not_paused(&env)?;
         let mut payment = load_payment(&env, payment_id).ok_or(Error::PaymentNotFound)?;
         payment.status = status;
         payment.updated_at = env.ledger().timestamp();
@@ -301,6 +368,7 @@ impl PaymentContract {
         reason: DisputeReason,
         case_id: String,
     ) -> Result<(), Error> {
+        Self::require_not_paused(&env)?;
         let mut payment = load_payment(&env, payment_id).ok_or(Error::PaymentNotFound)?;
         payment.status = PaymentStatus::Disputed;
         payment.dispute_reason_code = Some(dispute_reason_to_code(reason));
@@ -319,6 +387,7 @@ impl PaymentContract {
 
     /// Mark a disputed payment's case as resolved.
     pub fn resolve_dispute(env: Env, payment_id: u64) -> Result<(), Error> {
+        Self::require_not_paused(&env)?;
         let mut payment = load_payment(&env, payment_id).ok_or(Error::PaymentNotFound)?;
         if payment.dispute_case_id.is_some() {
             payment.dispute_resolved = true;
@@ -501,6 +570,7 @@ impl PaymentContract {
         region: String,
         emergency_pool: bool,
     ) -> Result<u64, Error> {
+        Self::require_not_paused(&env)?;
         donor.require_auth();
         if amount_per_period <= 0 {
             return Err(Error::InvalidAmount);
@@ -539,6 +609,7 @@ impl PaymentContract {
     }
 
     pub fn set_pledge_active(env: Env, pledge_id: u64, donor: Address, active: bool) -> Result<(), Error> {
+        Self::require_not_paused(&env)?;
         donor.require_auth();
         let mut p = load_pledge(&env, pledge_id).ok_or(Error::PaymentNotFound)?;
         if p.donor != donor {

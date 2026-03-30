@@ -41,6 +41,8 @@ import { OrderEventEntity } from './entities/order-event.entity';
 import { SorobanService } from '../soroban/soroban.service';
 import { ApprovalService } from '../approvals/approval.service';
 import { ApprovalActionType } from '../approvals/enums/approval.enum';
+import { SlaService } from '../sla/sla.service';
+import { SlaStage } from '../sla/enums/sla-stage.enum';
 
 @Injectable()
 export class OrdersService {
@@ -60,6 +62,7 @@ export class OrdersService {
     private readonly requestStatusService: RequestStatusService,
     private readonly feePolicyService: FeePolicyService,
     private readonly approvalService: ApprovalService,
+    private readonly slaService: SlaService,
   ) { }
 
   async findAll(status?: string, hospitalId?: string) {
@@ -136,6 +139,11 @@ export class OrdersService {
       payload: createOrderDto,
       actorId,
     });
+    // Start TRIAGE SLA clock
+    await this.slaService.startStage(saved.id, SlaStage.TRIAGE, {
+      hospitalId: saved.hospitalId,
+      bloodBankId: saved.bloodBankId ?? undefined,
+    }).catch((err) => this.logger.error(`SLA TRIAGE start failed: ${err.message}`));
     return saved;
   }
 
@@ -184,6 +192,12 @@ export class OrdersService {
     order.riderId = riderId;
     await this.orderRepo.save(order);
     this.eventEmitter.emit('order.rider.assigned', new OrderRiderAssignedEvent(orderId, riderId));
+    // Start DISPATCH_ACCEPTANCE clock when rider is assigned
+    await this.slaService.startStage(orderId, SlaStage.DISPATCH_ACCEPTANCE, {
+      hospitalId: order.hospitalId,
+      bloodBankId: order.bloodBankId ?? undefined,
+      riderId,
+    }).catch((err) => this.logger.error(`SLA DISPATCH_ACCEPTANCE start failed: ${err.message}`));
     return { message: 'Rider assigned successfully', data: { orderId, riderId } };
   }
 

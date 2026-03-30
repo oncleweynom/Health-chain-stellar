@@ -68,6 +68,56 @@ impl MatchingContract {
         Ok(())
     }
 
+    /// Pause all state-mutating functions. Admin only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), MatchingError> {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(MatchingError::Unauthorized)?;
+        if admin != stored {
+            return Err(MatchingError::Unauthorized);
+        }
+        env.storage().instance().set(&DataKey::Paused, &true);
+        Ok(())
+    }
+
+    /// Unpause the contract. Admin only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), MatchingError> {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(MatchingError::Unauthorized)?;
+        if admin != stored {
+            return Err(MatchingError::Unauthorized);
+        }
+        env.storage().instance().set(&DataKey::Paused, &false);
+        Ok(())
+    }
+
+    /// Returns whether the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), MatchingError> {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            return Err(MatchingError::ContractPaused);
+        }
+        Ok(())
+    }
+
     // ── Core matching ────────────────────────────────────────────────────────
 
     /// Match a single blood request against available inventory.
@@ -87,6 +137,7 @@ impl MatchingContract {
         request_id: u64,
     ) -> Result<MatchResult, MatchingError> {
         Self::require_initialized(&env)?;
+        Self::require_not_paused(&env)?;
 
         // Load request
         let req_addr: Address = env
@@ -172,6 +223,7 @@ impl MatchingContract {
         request_ids: Vec<u64>,
     ) -> Result<Vec<MatchResult>, MatchingError> {
         Self::require_initialized(&env)?;
+        Self::require_not_paused(&env)?;
 
         // Load all requests so we can sort them
         let req_addr: Address = env

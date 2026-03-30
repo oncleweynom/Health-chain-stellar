@@ -1477,3 +1477,60 @@ fn test_transition_pure_all_invalid_pairs_fails() {
     }
 }
 
+
+// ── Circuit breaker tests ─────────────────────────────────────────────────────
+
+#[test]
+fn test_pause_blocks_write_functions() {
+    let (env, admin, client, _) = create_test_contract();
+    env.ledger().set_timestamp(1000);
+
+    // Pause the contract
+    client.pause(&admin);
+    assert!(client.is_paused());
+
+    // register_blood should fail with ContractPaused (#160)
+    let result = client.try_register_blood(&admin, &BloodType::OPositive, &450u32, &None);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_pause_allows_read_functions() {
+    let (env, admin, client, _) = create_test_contract();
+    env.ledger().set_timestamp(1000);
+
+    // Register a unit before pausing
+    let unit_id = client.register_blood(&admin, &BloodType::OPositive, &450u32, &None);
+
+    // Pause
+    client.pause(&admin);
+
+    // Read functions still work
+    let unit = client.get_blood_unit(&unit_id);
+    assert_eq!(unit.id, unit_id);
+    assert!(!client.get_status_history(&unit_id).is_empty() || client.get_status_change_count(&unit_id) == 0);
+}
+
+#[test]
+fn test_unpause_restores_functionality() {
+    let (env, admin, client, _) = create_test_contract();
+    env.ledger().set_timestamp(1000);
+
+    client.pause(&admin);
+    assert!(client.is_paused());
+
+    client.unpause(&admin);
+    assert!(!client.is_paused());
+
+    // Write should succeed after unpause
+    let unit_id = client.register_blood(&admin, &BloodType::APositive, &300u32, &None);
+    assert!(unit_id > 0);
+}
+
+#[test]
+#[should_panic]
+fn test_non_admin_cannot_pause() {
+    let (env, _admin, client, _) = create_test_contract();
+    let attacker = Address::generate(&env);
+    client.pause(&attacker);
+}

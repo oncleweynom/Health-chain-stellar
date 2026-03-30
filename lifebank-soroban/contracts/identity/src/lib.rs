@@ -25,6 +25,7 @@ pub enum Error {
     InvalidDeliveryProof = 210,
     AlreadyVerified = 211,
     AlreadyUnverified = 212,
+    ContractPaused = 213,
 }
 
 // ---------------------------------------------------------------------------
@@ -47,6 +48,20 @@ pub enum Role {
     Donor,
     Rider,
     Custom(u32),
+}
+
+/// Fine-grained permission scopes that map to on-chain actions (Issue #374).
+/// These mirror the backend `Permission` enum for actions that require
+/// on-chain enforcement (e.g. settlement release, verification admin).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub enum PermissionScope {
+    InventoryWrite,
+    DispatchOverride,
+    RequestApprove,
+    DisputeResolve,
+    VerificationAdmin,
+    SettlementRelease,
 }
 
 #[contracttype]
@@ -153,6 +168,8 @@ pub enum DataKey {
     Delivery(u64),
     // AccessControlContract (and IdentityContract role storage)
     AddressRoles(Address),
+    // Fine-grained permission scopes (Issue #374)
+    AddressScopes(Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +193,56 @@ impl IdentityContract {
 
         env.events().publish((symbol_short!("init"),), admin);
 
+        Ok(())
+    }
+
+    /// Pause all state-mutating functions. Admin only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Unauthorized)?;
+        if admin != stored {
+            return Err(Error::Unauthorized);
+        }
+        env.storage().instance().set(&DataKey::Paused, &true);
+        Ok(())
+    }
+
+    /// Unpause the contract. Admin only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
+        admin.require_auth();
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Unauthorized)?;
+        if admin != stored {
+            return Err(Error::Unauthorized);
+        }
+        env.storage().instance().set(&DataKey::Paused, &false);
+        Ok(())
+    }
+
+    /// Returns whether the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), Error> {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            return Err(Error::ContractPaused);
+        }
         Ok(())
     }
 
@@ -213,6 +280,7 @@ impl IdentityContract {
         document_hashes: Vec<BytesN<32>>,
     ) -> Result<Address, Error> {
         owner.require_auth();
+        Self::require_not_paused(&env)?;
 
         if name.len() == 0 || license_number.len() == 0 {
             return Err(Error::InvalidInput);
@@ -470,6 +538,7 @@ impl IdentityContract {
     /// Verify an organization (admin only)
     pub fn verify_organization(env: Env, admin: Address, org_id: Address) -> Result<(), Error> {
         admin.require_auth();
+        Self::require_not_paused(&env)?;
         Self::require_role(&env, &admin, Role::Admin)?;
 
         let org_key = DataKey::Org(org_id.clone());
@@ -509,6 +578,7 @@ impl IdentityContract {
         reason: String,
     ) -> Result<(), Error> {
         admin.require_auth();
+        Self::require_not_paused(&env)?;
         Self::require_role(&env, &admin, Role::Admin)?;
 
         let org_key = DataKey::Org(org_id.clone());
@@ -550,6 +620,7 @@ impl IdentityContract {
         request_id: u64,
     ) -> Result<(), Error> {
         rater.require_auth();
+        Self::require_not_paused(&env)?;
 
         if rating < 1 || rating > 5 {
             return Err(Error::InvalidRating);
@@ -629,6 +700,7 @@ impl IdentityContract {
         badge_type: BadgeType,
     ) -> Result<(), Error> {
         admin.require_auth();
+        Self::require_not_paused(&env)?;
 
         // Verify caller is admin
         let stored_admin: Address = env
@@ -687,6 +759,7 @@ impl IdentityContract {
         badge_type: BadgeType,
     ) -> Result<(), Error> {
         admin.require_auth();
+        Self::require_not_paused(&env)?;
 
         let stored_admin: Address = env
             .storage()
@@ -746,6 +819,7 @@ impl IdentityContract {
         temperature_ok: bool,
     ) -> Result<(), Error> {
         verifier.require_auth();
+        Self::require_not_paused(&env)?;
 
         if quantity_delivered == 0 {
             return Err(Error::InvalidDeliveryProof);
@@ -987,6 +1061,86 @@ impl AccessControlContract {
         }
 
         new_roles
+    }
+
+    // ── Fine-grained permission scopes (Issue #374) ──────────────────────
+
+    /// Grant a permission scope to an address. Admin only.
+    pub fn grant_scope(env: Env, address: Address, scope: PermissionScope) {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+
+        let key = DataKey::AddressScopes(address.clone());
+        let mut scopes: Vec<PermissionScope> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        // Deduplicate
+        for i in 0..scopes.len() {
+            if scopes.get(i).unwrap() == scope {
+                return;
+            }
+        }
+        scopes.push_back(scope);
+        env.storage().persistent().set(&key, &scopes);
+    }
+
+    /// Revoke a permission scope from an address. Admin only.
+    pub fn revoke_scope(env: Env, address: Address, scope: PermissionScope) {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+
+        let key = DataKey::AddressScopes(address.clone());
+        if let Some(scopes) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Vec<PermissionScope>>(&key)
+        {
+            let mut new_scopes: Vec<PermissionScope> = Vec::new(&env);
+            for i in 0..scopes.len() {
+                let s = scopes.get(i).unwrap();
+                if s != scope {
+                    new_scopes.push_back(s);
+                }
+            }
+            env.storage().persistent().set(&key, &new_scopes);
+        }
+    }
+
+    /// Check whether an address holds a specific permission scope.
+    pub fn has_scope(env: Env, address: Address, scope: PermissionScope) -> bool {
+        let key = DataKey::AddressScopes(address);
+        if let Some(scopes) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Vec<PermissionScope>>(&key)
+        {
+            for i in 0..scopes.len() {
+                if scopes.get(i).unwrap() == scope {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Return all scopes granted to an address.
+    pub fn get_scopes(env: Env, address: Address) -> Vec<PermissionScope> {
+        let key = DataKey::AddressScopes(address);
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env))
     }
 }
 

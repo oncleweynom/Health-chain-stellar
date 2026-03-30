@@ -284,8 +284,11 @@ pub enum DataKey {
     /// Reservation record by reservation ID
     Reservation(u64),
 
-    /// Counter for generating reservation IDs
+    /// Reservation counter
     ReservationCounter,
+
+    /// Circuit breaker: contract is paused
+    Paused,
 }
 
 /// Reservation record for blood units locked for a specific requester

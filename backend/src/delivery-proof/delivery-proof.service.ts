@@ -11,12 +11,7 @@ import { CreateDeliveryProofDto } from './dto/create-delivery-proof.dto';
 import { DeliveryProofQueryDto } from './dto/delivery-proof-query.dto';
 import { DeliveryProofEntity } from './entities/delivery-proof.entity';
 import { SorobanService } from '../soroban/soroban.service';
-
-import { ConfigService } from '@nestjs/config';
-import { SorobanService } from '../soroban/soroban.service';
-import * as crypto from 'crypto';
-import * as fs from 'fs';
-import * as path from 'path';
+import { CustodyService } from '../custody/custody.service';
 
 // Blood products must be stored between 2°C and 6°C (backend compliance threshold)
 const TEMP_MIN_CELSIUS = 2;
@@ -40,6 +35,7 @@ export class DeliveryProofService {
     private readonly proofRepo: Repository<DeliveryProofEntity>,
     private readonly configService: ConfigService,
     private readonly sorobanService: SorobanService,
+    private readonly custodyService: CustodyService,
   ) {}
 
   async uploadPhoto(orderId: string, file: any) {
@@ -142,6 +138,9 @@ export class DeliveryProofService {
         'At least one temperature reading is required',
       );
     }
+
+    // Require all custody handoffs confirmed before delivery can be recorded (#380)
+    await this.custodyService.assertCustodyComplete(dto.orderId);
 
     const isTemperatureCompliant = dto.temperatureReadings.every(
       (t) => t >= TEMP_MIN_CELSIUS && t <= TEMP_MAX_CELSIUS,

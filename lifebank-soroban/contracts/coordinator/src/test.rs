@@ -381,3 +381,58 @@ fn test_rollback_blocked_after_settlement() {
     let result = h.coord.try_rollback(&1u64);
     assert_eq!(result, Err(Ok(CoordinatorError::CannotRollbackSettled)));
 }
+
+// ── Circuit breaker tests ─────────────────────────────────────────────────────
+
+#[test]
+fn test_coordinator_pause_blocks_allocate_units() {
+    let h = setup();
+    h.coord.pause(&h.admin);
+    assert!(h.coord.is_paused());
+
+    seed_pending_request(&h, 1);
+    let unit_id = register_unit(&h);
+    let pay_id = create_locked_payment(&h, 1);
+
+    let result = h.coord.try_allocate_units(&1u64, &vec![&h.env, unit_id], &pay_id, &h.admin);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_coordinator_pause_allows_get_workflow() {
+    let h = setup();
+
+    // Create a workflow first
+    seed_pending_request(&h, 10);
+    let unit_id = register_unit(&h);
+    let pay_id = create_locked_payment(&h, 10);
+    h.coord.allocate_units(&10u64, &vec![&h.env, unit_id], &pay_id, &h.admin);
+
+    h.coord.pause(&h.admin);
+
+    // Read still works
+    let wf = h.coord.get_workflow(&10u64);
+    assert_eq!(wf.request_id, 10);
+}
+
+#[test]
+fn test_coordinator_unpause_restores_writes() {
+    let h = setup();
+    h.coord.pause(&h.admin);
+    h.coord.unpause(&h.admin);
+    assert!(!h.coord.is_paused());
+
+    seed_pending_request(&h, 20);
+    let unit_id = register_unit(&h);
+    let pay_id = create_locked_payment(&h, 20);
+    h.coord.allocate_units(&20u64, &vec![&h.env, unit_id], &pay_id, &h.admin);
+    assert_eq!(h.coord.get_workflow(&20u64).status, WorkflowStatus::Allocated);
+}
+
+#[test]
+#[should_panic]
+fn test_coordinator_non_admin_cannot_pause() {
+    let h = setup();
+    let attacker = Address::generate(&h.env);
+    h.coord.pause(&attacker);
+}

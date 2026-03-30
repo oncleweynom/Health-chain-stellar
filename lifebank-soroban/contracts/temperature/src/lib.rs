@@ -26,6 +26,48 @@ impl TemperatureContract {
         Ok(())
     }
 
+    /// Pause all state-mutating functions. Admin only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored_admin = storage::get_admin(&env);
+        if admin != stored_admin {
+            return Err(ContractError::Unauthorized);
+        }
+        env.storage().instance().set(&DataKey::Paused, &true);
+        Ok(())
+    }
+
+    /// Unpause the contract. Admin only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored_admin = storage::get_admin(&env);
+        if admin != stored_admin {
+            return Err(ContractError::Unauthorized);
+        }
+        env.storage().instance().set(&DataKey::Paused, &false);
+        Ok(())
+    }
+
+    /// Returns whether the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            return Err(ContractError::ContractPaused);
+        }
+        Ok(())
+    }
+
     pub fn set_threshold(
         env: Env,
         admin: Address,
@@ -34,6 +76,7 @@ impl TemperatureContract {
         max_celsius_x100: i32,
     ) -> Result<(), ContractError> {
         admin.require_auth();
+        Self::require_not_paused(&env)?;
 
         let stored_admin = storage::get_admin(&env);
         if admin != stored_admin {
@@ -58,6 +101,7 @@ impl TemperatureContract {
         temperature_celsius_x100: i32,
         timestamp: u64,
     ) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         let threshold =
             storage::get_threshold(&env, unit_id).ok_or(ContractError::ThresholdNotFound)?;
 
@@ -285,6 +329,7 @@ impl TemperatureContract {
         unit_id: u64,
     ) -> Result<(), ContractError> {
         admin.require_auth();
+        Self::require_not_paused(&env)?;
 
         let stored_admin = storage::get_admin(&env);
         if admin != stored_admin {
@@ -810,5 +855,57 @@ mod tests {
         
         // Should definitely be compromised
         assert!(client.is_compromised(&unit_id), "Unit should be compromised after 100 violations");
+    }
+
+    // ── Circuit breaker tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_temperature_pause_blocks_log_reading() {
+        let (_env, admin, client) = create_test_contract();
+        let unit_id = 1u64;
+        client.set_threshold(&admin, &unit_id, &200, &600);
+
+        client.pause(&admin);
+        assert!(client.is_paused());
+
+        let result = client.try_log_reading(&unit_id, &400, &1000u64);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_temperature_pause_allows_get_readings() {
+        let (_env, admin, client) = create_test_contract();
+        let unit_id = 2u64;
+        client.set_threshold(&admin, &unit_id, &200, &600);
+        client.log_reading(&unit_id, &400, &1000u64);
+
+        client.pause(&admin);
+
+        // Read still works
+        let readings = client.get_readings(&unit_id);
+        assert!(!readings.is_empty());
+    }
+
+    #[test]
+    fn test_temperature_unpause_restores_writes() {
+        let (_env, admin, client) = create_test_contract();
+        let unit_id = 3u64;
+        client.set_threshold(&admin, &unit_id, &200, &600);
+
+        client.pause(&admin);
+        client.unpause(&admin);
+        assert!(!client.is_paused());
+
+        client.log_reading(&unit_id, &400, &2000u64);
+        let readings = client.get_readings(&unit_id);
+        assert!(!readings.is_empty());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_temperature_non_admin_cannot_pause() {
+        let (env, _admin, client) = create_test_contract();
+        let attacker = Address::generate(&env);
+        client.pause(&attacker);
     }
 }

@@ -37,6 +37,49 @@ impl InventoryContract {
         Ok(())
     }
 
+    /// Pause the contract. Only the admin can call this.
+    /// All state-mutating functions will return `ContractPaused` while paused.
+    pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored_admin = storage::get_admin(&env);
+        if admin != stored_admin {
+            return Err(ContractError::Unauthorized);
+        }
+        env.storage().instance().set(&DataKey::Paused, &true);
+        Ok(())
+    }
+
+    /// Unpause the contract. Only the admin can call this.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored_admin = storage::get_admin(&env);
+        if admin != stored_admin {
+            return Err(ContractError::Unauthorized);
+        }
+        env.storage().instance().set(&DataKey::Paused, &false);
+        Ok(())
+    }
+
+    /// Returns whether the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            return Err(ContractError::ContractPaused);
+        }
+        Ok(())
+    }
+
     /// Register a new blood donation into the inventory
     ///
     /// Both `donation_timestamp` (collected_at) and `expiration_timestamp` (expiry_at)
@@ -71,6 +114,8 @@ impl InventoryContract {
     ) -> Result<u64, ContractError> {
         // 1. Verify bank authentication
         bank_id.require_auth();
+
+        Self::require_not_paused(&env)?;
 
         // 2. Check contract is initialized
         if !env.storage().instance().has(&DataKey::Admin) {
@@ -179,6 +224,8 @@ impl InventoryContract {
         reason: Option<String>,
     ) -> Result<BloodUnit, ContractError> {
         authorized_by.require_auth();
+
+        Self::require_not_paused(&env)?;
 
         let admin = storage::get_admin(&env);
         if authorized_by != admin {
@@ -307,6 +354,8 @@ impl InventoryContract {
     ) -> Result<u64, ContractError> {
         authorized_by.require_auth();
 
+        Self::require_not_paused(&env)?;
+
         let admin = storage::get_admin(&env);
         if authorized_by != admin {
             return Err(ContractError::Unauthorized);
@@ -401,6 +450,8 @@ impl InventoryContract {
     ) -> Result<u64, ContractError> {
         requester.require_auth();
 
+        Self::require_not_paused(&env)?;
+
         if !storage::is_authorized_bank(&env, &requester) {
             return Err(ContractError::NotAuthorizedBloodBank);
         }
@@ -455,6 +506,7 @@ impl InventoryContract {
     /// If the reservation has already expired (ledger time > expiration_timestamp)
     /// the call still succeeds so callers can clean up stale reservations.
     pub fn release_reservation(env: Env, reservation_id: u64) -> Result<(), ContractError> {
+        Self::require_not_paused(&env)?;
         let reservation = storage::get_reservation(&env, reservation_id)
             .ok_or(ContractError::ReservationNotFound)?;
 
@@ -494,6 +546,8 @@ impl InventoryContract {
         batch: Vec<(Vec<u64>, u64, u64)>,
     ) -> Result<Vec<u64>, ContractError> {
         requester.require_auth();
+
+        Self::require_not_paused(&env)?;
 
         if !storage::is_authorized_bank(&env, &requester) {
             return Err(ContractError::NotAuthorizedBloodBank);

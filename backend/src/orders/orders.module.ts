@@ -19,6 +19,7 @@ import { OrderStateMachine } from './state-machine/order-state-machine';
 import { DisputePolicyService } from './services/dispute-policy.service';
 import { SorobanModule } from '../soroban/soroban.module';
 import { ApprovalModule } from '../approvals/approval.module';
+import { SlaModule } from '../sla/sla.module';
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { ApprovalModule } from '../approvals/approval.module';
     FeePolicyModule,
     SorobanModule,
     forwardRef(() => ApprovalModule),
+    SlaModule,
   ],
   controllers: [OrdersController],
   providers: [

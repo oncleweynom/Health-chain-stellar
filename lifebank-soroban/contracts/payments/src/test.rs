@@ -462,3 +462,63 @@ fn test_create_pledge_rejects_zero_interval() {
     let r = client.try_create_pledge(&donor, &100i128, &0u64, &pool, &cause, &region, &false);
     assert!(r.is_err());
 }
+
+// ── Circuit breaker tests ─────────────────────────────────────────────────────
+
+#[test]
+fn test_pause_blocks_create_payment() {
+    let (env, cid) = setup();
+    let client = PaymentContractClient::new(&env, &cid);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    client.pause(&admin);
+    assert!(client.is_paused());
+
+    let payer = Address::generate(&env);
+    let payee = Address::generate(&env);
+    let result = client.try_create_payment(&1u64, &payer, &payee, &500i128);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_pause_allows_get_payment() {
+    let (env, cid) = setup();
+    let client = PaymentContractClient::new(&env, &cid);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let (id, _, _) = make_payment(&env, &client, 1, 1000);
+    client.pause(&admin);
+
+    // Read still works
+    let p = client.get_payment(&id);
+    assert_eq!(p.id, id);
+}
+
+#[test]
+fn test_unpause_restores_payments() {
+    let (env, cid) = setup();
+    let client = PaymentContractClient::new(&env, &cid);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    client.pause(&admin);
+    client.unpause(&admin);
+    assert!(!client.is_paused());
+
+    let (id, _, _) = make_payment(&env, &client, 99, 200);
+    assert!(id > 0);
+}
+
+#[test]
+#[should_panic]
+fn test_non_admin_cannot_pause_payments() {
+    let (env, cid) = setup();
+    let client = PaymentContractClient::new(&env, &cid);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let attacker = Address::generate(&env);
+    client.pause(&attacker);
+}

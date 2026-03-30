@@ -2,8 +2,9 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { EventEmitterModule } from '@nestjs/event-emitter';
+import { BullModule } from '@nestjs/bullmq';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
-import { ThrottlerGuard } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 
 import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis';
 
@@ -18,6 +19,7 @@ import { PermissionsGuard } from './auth/guards/permissions.guard';
 import { BlockchainModule } from './blockchain/blockchain.module';
 import { BloodRequestsModule } from './blood-requests/blood-requests.module';
 import { BloodUnitsModule } from './blood-units/blood-units.module';
+import { AuditLogModule } from './common/audit/audit-log.module';
 import { EventsModule } from './events/events.module';
 import { CorrelationIdMiddleware } from './common/middleware/correlation-id.middleware';
 import { CorrelationIdService } from './common/middleware/correlation-id.service';
@@ -35,17 +37,27 @@ import { UserActivityModule } from './user-activity/user-activity.module';
 import { UsersModule } from './users/users.module';
 import { TrackingModule } from './tracking/tracking.module';
 import { TransparencyModule } from './transparency/transparency.module';
+import { ProofBundleModule } from './proof-bundle/proof-bundle.module';
 import { PolicyCenterModule } from './policy-center/policy-center.module';
+import { ReconciliationModule } from './reconciliation/reconciliation.module';
 
 import type Redis from 'ioredis';
-
-// Placeholder for activity logging interceptor (if exists, else will need to be implemented)
-// import { ActivityLoggingInterceptor } from './common/interceptors/activity-logging.interceptor';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     EventEmitterModule.forRoot(),
+    // Global BullMQ Redis connection — individual modules register their own queues
+    BullModule.forRootAsync({
+      imports: [ConfigModule],
+      useFactory: (configService: ConfigService) => ({
+        connection: {
+          host: configService.get<string>('REDIS_HOST', 'localhost'),
+          port: configService.get<number>('REDIS_PORT', 6379),
+        },
+      }),
+      inject: [ConfigService],
+    }),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       useFactory: (config: ConfigService) => ({
@@ -59,6 +71,30 @@ import type Redis from 'ioredis';
         synchronize: true, // DEV ONLY
       }),
       inject: [ConfigService],
+    }),
+    /**
+     * ThrottlerModule with Redis storage for distributed rate limiting.
+     * Per-role limits are resolved at request time by RoleAwareThrottlerGuard;
+     * the base limit here acts as a fallback only.
+     */
+    ThrottlerModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        throttlers: [
+          {
+            name: 'default',
+            ttl: THROTTLE_TTL_MS,
+            limit: 30, // fallback; overridden per-role by RoleAwareThrottlerGuard
+          },
+        ],
+        storage: new ThrottlerStorageRedisService({
+          host: config.get<string>('REDIS_HOST', 'localhost'),
+          port: config.get<number>('REDIS_PORT', 6379),
+          password: config.get<string>('REDIS_PASSWORD', undefined),
+        } as unknown as Redis),
+        getTracker: throttleGetTracker,
+      }),
     }),
     UsersModule,
     AuthModule,
@@ -80,20 +116,21 @@ import type Redis from 'ioredis';
     HospitalsModule,
     MapsModule,
     TransparencyModule,
+    ProofBundleModule,
     PolicyCenterModule,
+    ReconciliationModule,
   ],
   controllers: [AppController],
   providers: [
     AppService,
-    /** JWT authentication applied globally; use @Public() to opt-out */
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     /**
-     * Runs after JWT so throttling can use `req.user` on protected routes (IP otherwise).
+     * Runs after JWT so req.user is populated before role resolution.
+     * Replaces the generic ThrottlerGuard with role-aware limits.
      */
-    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: RoleAwareThrottlerGuard },
     /** Permission enforcement applied globally; use @RequirePermissions() to specify */
     { provide: APP_GUARD, useClass: PermissionsGuard },
-    // { provide: APP_INTERCEPTOR, useClass: ActivityLoggingInterceptor },
     CorrelationIdService,
   ],
 })
