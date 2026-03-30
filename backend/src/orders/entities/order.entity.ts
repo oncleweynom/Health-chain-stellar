@@ -51,6 +51,12 @@ export class OrderEntity {
   @Column({ name: 'dispute_reason', nullable: true, type: 'text' })
   disputeReason: string | null;
 
+  @Column({ name: 'on_chain_payment_id', type: 'varchar', nullable: true })
+  onChainPaymentId: string | null;
+
+  @Column({ name: 'payment_status', type: 'varchar', nullable: true })
+  paymentStatus: string | null;
+
   @VersionColumn()
   version: number;
 
