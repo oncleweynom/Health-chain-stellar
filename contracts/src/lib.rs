@@ -59,6 +59,8 @@ pub enum Error {
     AlreadyVerified = 27,
     /// Caller is an authorized actor but is not the current custodian of the unit.
     NotCurrentCustodian = 29,
+    InvalidMultiSigConfig = 30,
+    DuplicateApproval = 31,
 }
 
 // Alias for issue/docs terminology.
@@ -394,6 +396,8 @@ const HISTORY_KEY: &str = "HISTORY";
 const DISPUTE_METADATA_KEY: &str = "DISP_META";
 const DISPUTE_TIMEOUT_KEY: &str = "DSP_TO";
 const PAYMENT_STATS_KEY: &str = "PAY_STATS";
+const MULTISIG_CONFIG_KEY: &str = "MSIG_CFG";
+const PENDING_APPROVALS_KEY: &str = "PEND_APR";
 
 const _: () = assert!(BLOOD_UNITS_KEY.len() <= 9);
 const _: () = assert!(NEXT_ID_KEY.len() <= 9);
@@ -413,6 +417,8 @@ const _: () = assert!(HISTORY_KEY.len() <= 9);
 const _: () = assert!(DISPUTE_METADATA_KEY.len() <= 9);
 const _: () = assert!(DISPUTE_TIMEOUT_KEY.len() <= 9);
 const _: () = assert!(PAYMENT_STATS_KEY.len() <= 9);
+const _: () = assert!(MULTISIG_CONFIG_KEY.len() <= 9);
+const _: () = assert!(PENDING_APPROVALS_KEY.len() <= 9);
 
 /// Storage keys (single source of truth)
 pub(crate) const BLOOD_UNITS: Symbol = symbol_short!("UNITS");
@@ -433,6 +439,8 @@ pub(crate) const HISTORY: Symbol = symbol_short!("HISTORY");
 pub(crate) const DISPUTE_METADATA: Symbol = symbol_short!("DISP_META");
 pub(crate) const DISPUTE_TIMEOUT: Symbol = symbol_short!("DSP_TO");
 pub(crate) const PAYMENT_STATS: Symbol = symbol_short!("PAY_STATS");
+pub(crate) const MULTISIG_CONFIG: Symbol = symbol_short!("MSIG_CFG");
+pub(crate) const PENDING_APPROVALS: Symbol = symbol_short!("PEND_APR");
 /// Storage key enumeration for composite keys
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1927,6 +1935,12 @@ impl HealthChainContract {
 
     /// Configure the dispute timeout window in seconds (admin only).
     pub fn set_dispute_timeout(env: Env, timeout_secs: u64) -> Result<(), Error> {
+    /// Configure M-of-N multisig signers for high-value escrow releases.
+    pub fn configure_multisig(
+        env: Env,
+        signers: Vec<Address>,
+        threshold: u32,
+    ) -> Result<(), Error> {
         let admin: Address = env
             .storage()
             .instance()
@@ -1954,6 +1968,93 @@ impl HealthChainContract {
             .persistent()
             .get(&PAYMENT_STATS)
             .unwrap_or(PaymentStats::new())
+        let config = MultiSigConfig { signers, threshold };
+        config
+            .validate()
+            .map_err(|_| Error::InvalidMultiSigConfig)?;
+
+        env.storage().persistent().set(&MULTISIG_CONFIG, &config);
+        Ok(())
+    }
+
+    /// Propose an escrow release. Low-value payments keep single-admin flow.
+    /// High-value payments require threshold approvals from configured signers.
+    pub fn propose_release(env: Env, payment_id: u64, approver: Address) -> Result<bool, Error> {
+        approver.require_auth();
+
+        let mut payments: Map<u64, Payment> = env
+            .storage()
+            .persistent()
+            .get(&PAYMENTS)
+            .ok_or(Error::PaymentNotFound)?;
+
+        let mut payment = payments.get(payment_id).ok_or(Error::PaymentNotFound)?;
+        if !payment.can_transition_to(PaymentStatus::Completed) {
+            return Err(Error::InvalidPaymentStatus);
+        }
+
+        let mut pending_approvals: Map<u64, PendingApproval> = env
+            .storage()
+            .persistent()
+            .get(&PENDING_APPROVALS)
+            .unwrap_or(Map::new(&env));
+
+        if payment.amount < HIGH_VALUE_THRESHOLD {
+            let admin: Address = env
+                .storage()
+                .instance()
+                .get(&ADMIN)
+                .ok_or(Error::Unauthorized)?;
+            if approver != admin {
+                return Err(Error::Unauthorized);
+            }
+
+            payment.status = PaymentStatus::Completed;
+            payment.escrow_released_at = Some(env.ledger().timestamp());
+            payments.set(payment_id, payment);
+            env.storage().persistent().set(&PAYMENTS, &payments);
+            pending_approvals.remove(payment_id);
+            env.storage()
+                .persistent()
+                .set(&PENDING_APPROVALS, &pending_approvals);
+            return Ok(true);
+        }
+
+        let config: MultiSigConfig = env
+            .storage()
+            .persistent()
+            .get(&MULTISIG_CONFIG)
+            .ok_or(Error::InvalidMultiSigConfig)?;
+        config
+            .validate()
+            .map_err(|_| Error::InvalidMultiSigConfig)?;
+
+        if !config.is_signer(&approver) {
+            return Err(Error::Unauthorized);
+        }
+
+        let mut approval = pending_approvals
+            .get(payment_id)
+            .unwrap_or(PendingApproval::new(&env, payment_id));
+
+        approval
+            .register_vote(approver)
+            .map_err(|_| Error::DuplicateApproval)?;
+
+        if approval.has_reached_threshold(config.threshold) {
+            approval.executed = true;
+            payment.status = PaymentStatus::Completed;
+            payment.escrow_released_at = Some(env.ledger().timestamp());
+            payments.set(payment_id, payment);
+            env.storage().persistent().set(&PAYMENTS, &payments);
+        }
+
+        pending_approvals.set(payment_id, approval.clone());
+        env.storage()
+            .persistent()
+            .set(&PENDING_APPROVALS, &pending_approvals);
+
+        Ok(approval.executed)
     }
 
     /// Raise a dispute for a payment

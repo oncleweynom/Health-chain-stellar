@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@nest-lab/throttler-storage-redis": "^1.2.0",
+    "@nestjs/terminus": "^11.0.0",
     "@nestjs/bullmq": "^11.0.4",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.2",

@@ -131,6 +131,26 @@ describe('SorobanService', () => {
       );
     });
 
+    it('normalizes deprecated contract method aliases before enqueueing', async () => {
+      const job: SorobanTxJob = {
+        contractMethod: 'create_blood_request',
+        args: ['req-1'],
+        idempotencyKey: 'normalize-key',
+      };
+
+      await service.submitTransaction(job);
+
+      expect(mockTxQueue.add).toHaveBeenCalledWith(
+        expect.objectContaining({
+          contractMethod: 'create_request',
+          metadata: expect.objectContaining({
+            normalizedFromContractMethod: 'create_blood_request',
+          }),
+        }),
+        expect.any(Object),
+      );
+    });
+
     it('should use default maxRetries if not provided', async () => {
       const job: SorobanTxJob = {
         contractMethod: 'test',

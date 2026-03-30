@@ -15,6 +15,8 @@ import {
 
 import { OrderEntity } from '../orders/entities/order.entity';
 import { OrderStatus } from '../orders/enums/order-status.enum';
+import { BloodRequestEntity } from '../blood-requests/entities/blood-request.entity';
+import { DonationEntity } from '../donations/entities/donation.entity';
 
 import { InventoryEntity } from './entities/inventory.entity';
 import { InventoryForecastingService } from './inventory-forecasting.service';
@@ -42,6 +44,39 @@ class TestOrderEntity {
 
   @Column({ name: 'rider_id', nullable: true, type: 'varchar' })
   riderId: string | null;
+
+  @CreateDateColumn({ name: 'created_at' })
+  createdAt: Date;
+
+  @UpdateDateColumn({ name: 'updated_at' })
+  updatedAt: Date;
+}
+
+@Entity('blood_requests')
+class TestBloodRequestEntity {
+  @PrimaryGeneratedColumn('uuid')
+  id: string;
+
+  @Column({ name: 'delivery_address', nullable: true })
+  deliveryAddress: string | null;
+
+  @Column({ type: 'simple-json', nullable: true })
+  items: Array<{ bloodType: string; quantityMl: number }>;
+
+  @CreateDateColumn({ name: 'created_at' })
+  createdAt: Date;
+
+  @UpdateDateColumn({ name: 'updated_at' })
+  updatedAt: Date;
+}
+
+@Entity('donations')
+class TestDonationEntity {
+  @PrimaryGeneratedColumn('uuid')
+  id: string;
+
+  @Column({ type: 'simple-json', nullable: true })
+  metadata: Record<string, unknown> | null;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
@@ -79,10 +114,20 @@ describe('InventoryForecasting Integration (SQLite)', () => {
         TypeOrmModule.forRoot({
           type: 'sqlite',
           database: ':memory:',
-          entities: [TestOrderEntity, InventoryEntity],
+          entities: [
+            TestOrderEntity,
+            TestBloodRequestEntity,
+            TestDonationEntity,
+            InventoryEntity,
+          ],
           synchronize: true,
         }),
-        TypeOrmModule.forFeature([TestOrderEntity, InventoryEntity]),
+        TypeOrmModule.forFeature([
+          TestOrderEntity,
+          TestBloodRequestEntity,
+          TestDonationEntity,
+          InventoryEntity,
+        ]),
       ],
       providers: [
         InventoryForecastingService,
@@ -98,10 +143,17 @@ describe('InventoryForecasting Integration (SQLite)', () => {
           provide: getQueueToken('donor-outreach'),
           useValue: mockQueue,
         },
-        // HACK: Use TestOrderEntity repository for OrderEntity token
         {
           provide: getRepositoryToken(OrderEntity),
           useExisting: getRepositoryToken(TestOrderEntity),
+        },
+        {
+          provide: getRepositoryToken(BloodRequestEntity),
+          useExisting: getRepositoryToken(TestBloodRequestEntity),
+        },
+        {
+          provide: getRepositoryToken(DonationEntity),
+          useExisting: getRepositoryToken(TestDonationEntity),
         },
       ],
     }).compile();

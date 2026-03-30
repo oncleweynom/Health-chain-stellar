@@ -1,4 +1,4 @@
-use crate::types::{BloodRegisteredEvent, BloodStatus, BloodType, StatusChangeEvent};
+use crate::types::{AuditEvent, BloodRegisteredEvent, BloodStatus, BloodType, StatusChangeEvent};
 use soroban_sdk::{Address, Env, String, Symbol};
 
 /// Emit a BloodRegistered event
@@ -44,6 +44,7 @@ pub fn emit_status_change(
 ) {
     let changed_at = env.ledger().timestamp();
 
+    // Legacy event kept for backwards compatibility
     let event = StatusChangeEvent {
         blood_unit_id,
         from_status,
@@ -55,6 +56,18 @@ pub fn emit_status_change(
 
     env.events()
         .publish((Symbol::new(env, "status_changed"),), event);
+
+    // Canonical audit event — immutable on-chain audit trail
+    let audit = AuditEvent {
+        unit_id: blood_unit_id,
+        previous_status: from_status,
+        new_status: to_status,
+        actor: authorized_by.clone(),
+        timestamp: changed_at,
+    };
+
+    env.events()
+        .publish((Symbol::new(env, "bld_unit_chg"),), audit);
 }
 
 /// Emit an event when an invalid status transition is attempted.

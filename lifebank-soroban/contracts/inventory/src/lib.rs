@@ -423,8 +423,54 @@ impl InventoryContract {
         storage::get_status_history(&env, unit_id)
     }
 
+    /// Return a single page of status history. O(1) storage reads.
+    pub fn get_status_history_page(
+        env: Env,
+        unit_id: u64,
+        page: u32,
+    ) -> Vec<crate::types::StatusChangeHistory> {
+        storage::get_status_history_page(&env, unit_id, page)
+    }
+
+    /// Return the last page number for a unit's history (0-based).
+    pub fn get_history_page_count(env: Env, unit_id: u64) -> u32 {
+        storage::get_history_page_count(&env, unit_id)
+    }
+
     pub fn get_status_change_count(env: Env, unit_id: u64) -> u64 {
         storage::get_blood_unit_status_change_count(&env, unit_id)
+    }
+
+    /// Register multiple blood units in a single transaction.
+    /// Returns a Vec of the new blood unit IDs in input order.
+    pub fn batch_register_blood(
+        env: Env,
+        bank_id: Address,
+        entries: Vec<(BloodType, u32, Option<Address>)>,
+    ) -> Result<Vec<u64>, ContractError> {
+        bank_id.require_auth();
+        Self::require_not_paused(&env)?;
+
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(ContractError::NotInitialized);
+        }
+        if !storage::is_authorized_bank(&env, &bank_id) {
+            return Err(ContractError::NotAuthorizedBloodBank);
+        }
+
+        let mut ids: Vec<u64> = Vec::new(&env);
+        for i in 0..entries.len() {
+            let (blood_type, quantity_ml, donor_id) = entries.get(i).unwrap();
+            let id = Self::register_blood(
+                env.clone(),
+                bank_id.clone(),
+                blood_type,
+                quantity_ml,
+                donor_id,
+            )?;
+            ids.push_back(id);
+        }
+        Ok(ids)
     }
 
     /// Reserve one or more blood units for a hospital requester.

@@ -19,11 +19,15 @@ import { PaginatedResponse, PaginationQueryDto } from '../common/pagination';
 import { CreateInventoryDto } from './dto/create-inventory.dto';
 import { UpdateInventoryDto } from './dto/update-inventory.dto';
 import { InventoryStockEntity } from './entities/inventory-stock.entity';
+import { InventoryForecastingService } from './inventory-forecasting.service';
 import { InventoryService } from './inventory.service';
 
 @Controller('inventory')
 export class InventoryController {
-  constructor(private readonly inventoryService: InventoryService) {}
+  constructor(
+    private readonly inventoryService: InventoryService,
+    private readonly inventoryForecastingService: InventoryForecastingService,
+  ) {}
 
   @RequirePermissions(Permission.VIEW_INVENTORY)
   @Get()
@@ -73,6 +77,18 @@ export class InventoryController {
   getReorderSummary() {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call
     return this.inventoryService.getReorderSummary();
+  }
+
+  @RequirePermissions(Permission.VIEW_INVENTORY)
+  @Get('forecast')
+  getForecast() {
+    return this.inventoryForecastingService.calculateDemandForecasts();
+  }
+
+  @RequirePermissions(Permission.ADMIN_ACCESS)
+  @Post('forecast/recalibrate')
+  recalibrateForecast() {
+    return this.inventoryForecastingService.recalibrate();
   }
 
   @RequirePermissions(Permission.VIEW_INVENTORY)
